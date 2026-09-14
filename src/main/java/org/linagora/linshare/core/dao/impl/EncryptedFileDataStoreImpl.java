@@ -51,6 +51,10 @@ import com.google.common.io.ByteSource;
  *
  * <p>{@code remove}/{@code exists} are pure pass-through: deletion never
  * requires the key service (ARCH.md 18, 20).
+ *
+ * <p>{@code readEnabled} must be {@code true} whenever {@code writeEnabled}
+ * is {@code true}: blobs written encrypted must remain decryptable, so
+ * read can never trail write in the rollout. The constructor enforces this.
  */
 public class EncryptedFileDataStoreImpl implements FileDataStore {
 
@@ -73,6 +77,11 @@ public class EncryptedFileDataStoreImpl implements FileDataStore {
 			boolean allowLegacyRead) {
 		if (delegate == null || keyEncryptionService == null || encryptionParameters == null) {
 			throw new IllegalArgumentException("delegate, keyEncryptionService and encryptionParameters must not be null");
+		}
+		if (writeEnabled && !readEnabled) {
+			throw new IllegalArgumentException(
+					"readEnabled must be true whenever writeEnabled is true: blobs written encrypted "
+							+ "must remain decryptable, otherwise they would be served back as raw ciphertext");
 		}
 		this.delegate = delegate;
 		this.keyEncryptionService = keyEncryptionService;

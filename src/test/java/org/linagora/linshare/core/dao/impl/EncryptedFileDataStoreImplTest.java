@@ -88,6 +88,14 @@ class EncryptedFileDataStoreImplTest {
 	}
 
 	@Test
+	void constructorRejectsWriteEnabledWithReadDisabled() {
+		FileDataStore delegate = mock(FileDataStore.class);
+
+		assertThrows(IllegalArgumentException.class, () -> new EncryptedFileDataStoreImpl(delegate, newKeyService(),
+				smallChunkParams(), true, false, true));
+	}
+
+	@Test
 	void removeAndExistsArePureDelegation() {
 		FileDataStore delegate = mock(FileDataStore.class);
 		when(delegate.exists(any())).thenReturn(true);
@@ -153,6 +161,31 @@ class EncryptedFileDataStoreImplTest {
 			roundTripped = ByteStreams.toByteArray(in);
 		}
 		assertArrayEquals(plaintext, roundTripped);
+	}
+
+	@Test
+	void writeDisabledButReadEnabledDecryptsPreExistingEncryptedBlob() throws Exception {
+		InMemoryFileDataStore fakeDelegate = new InMemoryFileDataStore();
+		KeyEncryptionService keyService = newKeyService();
+		byte[] plaintext = randomBytes(16 * 5 + 3);
+		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream",
+				(long) plaintext.length, "f.bin");
+
+		// Simulates a blob written by an earlier instance while writeEnabled was
+		// true, before writes were later disabled (e.g. a rollback that must
+		// still be able to serve already-encrypted blobs).
+		EncryptedFileDataStoreImpl writer = new EncryptedFileDataStoreImpl(fakeDelegate, keyService,
+				smallChunkParams(), true, true, true);
+		writer.add(ByteSource.wrap(plaintext), metadata);
+
+		EncryptedFileDataStoreImpl readOnlyStore = new EncryptedFileDataStoreImpl(fakeDelegate, keyService,
+				smallChunkParams(), false, true, true);
+
+		byte[] result;
+		try (InputStream in = readOnlyStore.get(metadata).openStream()) {
+			result = ByteStreams.toByteArray(in);
+		}
+		assertArrayEquals(plaintext, result);
 	}
 
 	@Test

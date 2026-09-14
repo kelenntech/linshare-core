@@ -74,6 +74,23 @@ class EncryptedFileDataStoreFactoryTest {
 	}
 
 	@Test
+	void failsClosedAtStartupWhenWriteEnabledButReadDisabled(@TempDir Path tempDir) throws Exception {
+		Path keyFile = tempDir.resolve("master.key");
+		Files.write(keyFile, new byte[32]);
+
+		FileDataStore delegate = mock(FileDataStore.class);
+		EncryptedFileDataStoreFactory factory = new EncryptedFileDataStoreFactory();
+		factory.setDelegate(delegate);
+		factory.setWriteEnabled(true);
+		factory.setReadEnabled(false);
+		factory.setKeyProvider("local");
+		factory.setLocalMasterKeyFile(keyFile.toString());
+		factory.setKeyId("test-kek");
+
+		assertThrows(IllegalArgumentException.class, factory::getDefault);
+	}
+
+	@Test
 	void failsClosedAtStartupWhenMasterKeyHasWrongLength(@TempDir Path tempDir) throws Exception {
 		Path keyFile = tempDir.resolve("master.key");
 		Files.write(keyFile, new byte[16]); // wrong length, must be 32 bytes
