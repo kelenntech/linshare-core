@@ -188,7 +188,7 @@ class EncryptedBlobMigratorTest {
 		new EncryptedBlobMigrator(store, keyService, params).migrate(metadata, sha256Hex(legacyPlaintext));
 
 		EncryptedFileDataStoreImpl decoratedStore = new EncryptedFileDataStoreImpl(store, keyService, params, true,
-				true, true);
+				true, true, null, null);
 		byte[] roundTripped;
 		try (InputStream in = decoratedStore.get(metadata).openStream()) {
 			roundTripped = ByteStreams.toByteArray(in);

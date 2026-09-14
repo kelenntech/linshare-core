@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -68,7 +69,8 @@ class EncryptedFileSystemJcloudIntegrationTest {
 		KeyEncryptionService keyEncryptionService = new LocalKeyEncryptionService(randomMasterKey(), "test-kek");
 		EncryptionParameters params = new EncryptionParameters(64 * 1024, EncryptedBlobHeader.DEFAULT_KEY_ID_CAPACITY,
 				EncryptedBlobHeader.DEFAULT_WRAPPED_KEY_CAPACITY);
-		return new EncryptedFileDataStoreImpl(delegate, keyEncryptionService, params, true, true, allowLegacyRead);
+		return new EncryptedFileDataStoreImpl(delegate, keyEncryptionService, params, true, true, allowLegacyRead,
+				null, null);
 	}
 
 	private byte[] randomMasterKey() {
@@ -153,7 +155,7 @@ class EncryptedFileSystemJcloudIntegrationTest {
 		assertArrayEquals(EncryptedBlobHeader.magic(), Arrays.copyOf(persisted, 4));
 
 		EncryptedFileDataStoreImpl decoratedStore = new EncryptedFileDataStoreImpl(rawStore, keyEncryptionService,
-				params, true, true, true);
+				params, true, true, true, null, null);
 		byte[] decrypted;
 		try (InputStream in = decoratedStore.get(stored).openStream()) {
 			decrypted = ByteStreams.toByteArray(in);
@@ -176,7 +178,7 @@ class EncryptedFileSystemJcloudIntegrationTest {
 		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream",
 				(long) plaintext.length, "rotate-me.bin");
 		EncryptedFileDataStoreImpl encryptedStore = new EncryptedFileDataStoreImpl(rawStore, oldKeyService, params,
-				true, true, true);
+				true, true, true, null, null);
 		FileMetaData stored = encryptedStore.add(ByteSource.wrap(plaintext), metadata);
 
 		Path persistedFile = findPersistedFile(tempDir, stored.getUuid());
@@ -203,7 +205,7 @@ class EncryptedFileSystemJcloudIntegrationTest {
 		assertArrayEquals(chunksBefore, chunksAfter, "chunk ciphertext must be untouched by rotation");
 
 		EncryptedFileDataStoreImpl rotatedStore = new EncryptedFileDataStoreImpl(rawStore, newKeyService, params,
-				true, true, true);
+				true, true, true, null, null);
 		byte[] decrypted;
 		try (InputStream in = rotatedStore.get(stored).openStream()) {
 			decrypted = ByteStreams.toByteArray(in);
@@ -211,6 +213,68 @@ class EncryptedFileSystemJcloudIntegrationTest {
 		assertArrayEquals(plaintext, decrypted);
 
 		assertEquals(RotationOutcome.ALREADY_ROTATED, rotator.rotate(stored, "new-kek"));
+	}
+
+	@Test
+	void rotateKekThroughEncryptedFileDataStoreImplKeepsNotYetRotatedBlobsReadable(@TempDir Path tempDir)
+			throws Exception {
+		FileSystemJcloudFileDataStoreImpl rawStore = (FileSystemJcloudFileDataStoreImpl) newRawFilesystemStore(
+				tempDir);
+		KeyEncryptionService oldKeyService = new LocalKeyEncryptionService(randomMasterKey(), "old-kek");
+		KeyEncryptionService newKeyService = new LocalKeyEncryptionService(randomMasterKey(), "new-kek");
+		EncryptionParameters params = new EncryptionParameters(64 * 1024, EncryptedBlobHeader.DEFAULT_KEY_ID_CAPACITY,
+				EncryptedBlobHeader.DEFAULT_WRAPPED_KEY_CAPACITY);
+
+		// Mirrors what EncryptedFileDataStoreFactory builds once a previous
+		// key is configured: reads span both keys, writes always target the
+		// new one, and the store owns a KekRotator built from the same pair.
+		KeyEncryptionService rotatableKeyService = new org.linagora.linshare.storage.encryption.key.RotatableKeyEncryptionService(
+				"new-kek", newKeyService, "old-kek", oldKeyService);
+		KekRotator rotator = new KekRotator(rawStore, oldKeyService, newKeyService);
+		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(rawStore, rotatableKeyService, params, true,
+				true, true, "new-kek", rotator);
+
+		byte[] plaintextA = randomBytes(1000);
+		FileMetaData notYetRotated = store.add(ByteSource.wrap(plaintextA),
+				new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream", (long) plaintextA.length,
+						"not-yet-rotated.bin"));
+
+		// A blob written before rotation is encrypted under old-kek (the
+		// store's own writes always target new-kek once it holds the
+		// composite key service pointed at the new key for wrap, but this
+		// simulates a blob that already existed under the previous key,
+		// analogous to migrationOfLegacyBlobOnRealFilesystemUsesAtomicRename
+		// above): write it directly under the raw store with the old key.
+		EncryptedFileDataStoreImpl oldOnlyStore = new EncryptedFileDataStoreImpl(rawStore, oldKeyService, params,
+				true, true, true, "old-kek", null);
+		byte[] plaintextB = randomBytes(500);
+		FileMetaData legacyKeyed = oldOnlyStore.add(ByteSource.wrap(plaintextB), new FileMetaData(
+				FileMetaDataKind.DATA, "application/octet-stream", (long) plaintextB.length, "old-keyed.bin"));
+
+		// Before rotation runs, the composite-backed store can still read a
+		// blob encrypted under the old key.
+		byte[] readBeforeRotation;
+		try (InputStream in = store.get(legacyKeyed).openStream()) {
+			readBeforeRotation = ByteStreams.toByteArray(in);
+		}
+		assertArrayEquals(plaintextB, readBeforeRotation);
+
+		assertTrue(store.isRotationConfigured());
+		RotationOutcome outcome = store.rotateKek(legacyKeyed);
+		assertEquals(RotationOutcome.ROTATED, outcome);
+
+		byte[] readAfterRotation;
+		try (InputStream in = store.get(legacyKeyed).openStream()) {
+			readAfterRotation = ByteStreams.toByteArray(in);
+		}
+		assertArrayEquals(plaintextB, readAfterRotation);
+
+		// The freshly-written blob (already under new-kek) is untouched.
+		byte[] readNotYetRotated;
+		try (InputStream in = store.get(notYetRotated).openStream()) {
+			readNotYetRotated = ByteStreams.toByteArray(in);
+		}
+		assertArrayEquals(plaintextA, readNotYetRotated);
 	}
 
 	private static String sha256Hex(byte[] data) throws Exception {

@@ -122,6 +122,16 @@ linshare.documents.encryption.vault.address=
 linshare.documents.encryption.vault.token-file=
 linshare.documents.encryption.vault.transit-key-name=
 
+# Key rotation (optional): set previous-key-id (plus the matching
+# local/vault previous-key property below) alongside key-id above to let
+# the rotation batch (see job.encryption.rotation.cron.expression) re-wrap
+# existing blobs from the previous key onto the current one, while ordinary
+# reads keep decrypting not-yet-rotated blobs too. Leave previous-key-id
+# empty to disable rotation entirely (default; changes nothing).
+linshare.documents.encryption.previous-key-id=
+linshare.documents.encryption.local.previous-master-key-file=
+linshare.documents.encryption.vault.previous-transit-key-name=
+
 ######## Extended storage options ########
 
 #### Object storage options ####
@@ -241,6 +251,13 @@ linshare.mongo.bigfiles.credentials=
 # documents and migrates any still-legacy-plaintext blob to LSE1 (docs/ARCH.md
 # Phase 5). Safe to run repeatedly; already-migrated blobs are cheap no-ops.
 # job.encryption.migration.cron.expression=0 45 0 * * ?
+
+# Rotation batch is launched every day at 1:30a.m. It is a no-op unless
+# linshare.documents.encryption.previous-key-id is set, in which case it
+# re-wraps each document's DEK from the previous key to the current one
+# (chunk ciphertext itself is never re-encrypted). Safe to run repeatedly;
+# already-rotated blobs are cheap no-ops.
+# job.encryption.rotation.cron.expression=0 30 1 * * ?
 
 # Fetching consistency batch is launched at 2a.m every day
 # This cron is responsible of :

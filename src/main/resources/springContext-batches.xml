@@ -104,6 +104,13 @@
 		<constructor-arg ref="fileDataStore" />
 	</bean>
 
+	<bean name="rotateKekBatch"
+		class="org.linagora.linshare.core.batches.impl.RotateKekBatchImpl">
+		<constructor-arg ref="accountRepository" />
+		<constructor-arg ref="documentRepository" />
+		<constructor-arg ref="fileDataStore" />
+	</bean>
+
 	<bean name="enableUploadRequestBatch"
 		class="org.linagora.linshare.core.batches.impl.EnableUploadRequestBatchImpl">
 		<constructor-arg ref="accountRepository" />

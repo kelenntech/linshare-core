@@ -69,6 +69,25 @@
 		<property name="cronExpression" value="${job.encryption.migration.cron.expression}" />
 	</bean>
 
+	<bean id="rotateKekBatchJob" class="org.springframework.scheduling.quartz.JobDetailFactoryBean">
+		<property name="jobClass"
+			value="org.linagora.linshare.core.job.quartz.LinShareJobBean" />
+		<property name="jobDataAsMap">
+			<map>
+				<entry key="batch">
+					<list value-type="org.linagora.linshare.core.job.quartz.LinShareJobBean">
+						<ref bean="rotateKekBatch" />
+					</list>
+				</entry>
+				<entry key="batchRunner" value-ref="batchRunner" />
+			</map>
+		</property>
+	</bean>
+	<bean id="rotateKekBatchJobTrigger" class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+		<property name="jobDetail" ref="rotateKekBatchJob" />
+		<property name="cronExpression" value="${job.encryption.rotation.cron.expression}" />
+	</bean>
+
 	<bean id="deleteMissingDocumentsBatchJob" class="org.springframework.scheduling.quartz.JobDetailFactoryBean">
 		<property name="jobClass"
 			value="org.linagora.linshare.core.job.quartz.LinShareJobBean" />
@@ -249,6 +268,7 @@
                 <ref bean="deleteMissingDocumentsBatchJobTrigger"/>
                 <ref bean="computeDocumentMimeTypeBatchJobTrigger" />
                 <ref bean="migrateLegacyDocumentsBatchJobTrigger" />
+                <ref bean="rotateKekBatchJobTrigger" />
                 <ref bean="cleaningShareEntriesJobTrigger"/>
                 <ref bean="dailyBatchJobTrigger"/>
                 <ref bean="synchronizingLdapGroupsJobTrigger"/>

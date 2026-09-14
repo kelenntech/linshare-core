@@ -55,6 +55,10 @@ import com.google.common.io.ByteSource;
  * <p>{@code readEnabled} must be {@code true} whenever {@code writeEnabled}
  * is {@code true}: blobs written encrypted must remain decryptable, so
  * read can never trail write in the rollout. The constructor enforces this.
+ *
+ * <p>{@code kekRotator} is {@code null} unless KEK rotation is configured
+ * (a previous key alongside the current one); {@link #rotateKek} then
+ * fails closed rather than silently no-op'ing.
  */
 public class EncryptedFileDataStoreImpl implements FileDataStore {
 
@@ -72,9 +76,13 @@ public class EncryptedFileDataStoreImpl implements FileDataStore {
 
 	private final EncryptedBlobMigrator migrator;
 
+	private final String currentKeyId;
+
+	private final KekRotator kekRotator;
+
 	public EncryptedFileDataStoreImpl(FileDataStore delegate, KeyEncryptionService keyEncryptionService,
 			EncryptionParameters encryptionParameters, boolean writeEnabled, boolean readEnabled,
-			boolean allowLegacyRead) {
+			boolean allowLegacyRead, String currentKeyId, KekRotator kekRotator) {
 		if (delegate == null || keyEncryptionService == null || encryptionParameters == null) {
 			throw new IllegalArgumentException("delegate, keyEncryptionService and encryptionParameters must not be null");
 		}
@@ -90,6 +98,8 @@ public class EncryptedFileDataStoreImpl implements FileDataStore {
 		this.readEnabled = readEnabled;
 		this.allowLegacyRead = allowLegacyRead;
 		this.migrator = new EncryptedBlobMigrator(delegate, keyEncryptionService, encryptionParameters);
+		this.currentKeyId = currentKeyId;
+		this.kekRotator = kekRotator;
 	}
 
 	/** @see EncryptedBlobMigrator#isLegacyBlob */
@@ -100,6 +110,19 @@ public class EncryptedFileDataStoreImpl implements FileDataStore {
 	/** @see EncryptedBlobMigrator#migrate */
 	public MigrationOutcome migrateLegacyBlob(FileMetaData metadata, String expectedSha256Hex) throws IOException {
 		return migrator.migrate(metadata, expectedSha256Hex);
+	}
+
+	/** Whether a previous key is configured, making {@link #rotateKek} usable. */
+	public boolean isRotationConfigured() {
+		return kekRotator != null;
+	}
+
+	/** @see KekRotator#rotate */
+	public RotationOutcome rotateKek(FileMetaData metadata) throws IOException {
+		if (kekRotator == null) {
+			throw new IllegalStateException("Key rotation is not configured: no previous key material is set");
+		}
+		return kekRotator.rotate(metadata, currentKeyId);
 	}
 
 	@Override

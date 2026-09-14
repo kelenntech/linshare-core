@@ -23,11 +23,13 @@ import java.nio.file.Paths;
 
 import org.linagora.linshare.core.dao.FileDataStore;
 import org.linagora.linshare.core.dao.impl.EncryptedFileDataStoreImpl;
+import org.linagora.linshare.core.dao.impl.KekRotator;
 import org.linagora.linshare.storage.encryption.crypto.EncryptionParameters;
 import org.linagora.linshare.storage.encryption.exception.EncryptedBlobKeyException;
 import org.linagora.linshare.storage.encryption.format.EncryptedBlobHeader;
 import org.linagora.linshare.storage.encryption.key.KeyEncryptionService;
 import org.linagora.linshare.storage.encryption.key.LocalKeyEncryptionService;
+import org.linagora.linshare.storage.encryption.key.RotatableKeyEncryptionService;
 import org.linagora.linshare.storage.encryption.key.VaultKeyEncryptionService;
 
 /**
@@ -66,18 +68,34 @@ public class EncryptedFileDataStoreFactory {
 
 	protected String vaultTransitKeyName;
 
+	protected String previousKeyId;
+
+	protected String previousLocalMasterKeyFile;
+
+	protected String previousVaultTransitKeyName;
+
 	public FileDataStore getDefault() {
 		if (!writeEnabled && !readEnabled) {
 			return delegate;
 		}
-		KeyEncryptionService keyEncryptionService = buildKeyEncryptionService();
+		KeyEncryptionService currentKeyService = buildKeyEncryptionService(keyId, localMasterKeyFile,
+				vaultTransitKeyName);
+		KeyEncryptionService previousKeyService = buildPreviousKeyEncryptionService();
+		KeyEncryptionService effectiveKeyService = currentKeyService;
+		KekRotator kekRotator = null;
+		if (previousKeyService != null) {
+			effectiveKeyService = new RotatableKeyEncryptionService(keyId, currentKeyService, previousKeyId,
+					previousKeyService);
+			kekRotator = new KekRotator(delegate, previousKeyService, currentKeyService);
+		}
 		EncryptionParameters params = new EncryptionParameters(chunkSize,
 				EncryptedBlobHeader.DEFAULT_KEY_ID_CAPACITY, EncryptedBlobHeader.DEFAULT_WRAPPED_KEY_CAPACITY);
-		return new EncryptedFileDataStoreImpl(delegate, keyEncryptionService, params, writeEnabled, readEnabled,
-				allowLegacyRead);
+		return new EncryptedFileDataStoreImpl(delegate, effectiveKeyService, params, writeEnabled, readEnabled,
+				allowLegacyRead, keyId, kekRotator);
 	}
 
-	private KeyEncryptionService buildKeyEncryptionService() {
+	private KeyEncryptionService buildKeyEncryptionService(String keyId, String localMasterKeyFile,
+			String vaultTransitKeyName) {
 		if (LOCAL_KEY_PROVIDER.equals(keyProvider)) {
 			requireNonEmpty(localMasterKeyFile, "linshare.documents.encryption.local.master-key-file");
 			requireNonEmpty(keyId, "linshare.documents.encryption.key-id");
@@ -91,6 +109,23 @@ public class EncryptedFileDataStoreFactory {
 		}
 		throw new EncryptedBlobKeyException(
 				"Unsupported linshare.documents.encryption.key-provider: " + keyProvider);
+	}
+
+	/**
+	 * @return {@code null} when {@code previousKeyId} isn't set (rotation not
+	 *         configured, the default) — a service for the previous key
+	 *         otherwise, so the rotation batch can re-wrap existing blobs and
+	 *         ordinary reads keep working for blobs not yet rotated.
+	 */
+	private KeyEncryptionService buildPreviousKeyEncryptionService() {
+		if (previousKeyId == null || previousKeyId.isEmpty()) {
+			return null;
+		}
+		if (previousKeyId.equals(keyId)) {
+			throw new EncryptedBlobKeyException(
+					"linshare.documents.encryption.previous-key-id must differ from key-id");
+		}
+		return buildKeyEncryptionService(previousKeyId, previousLocalMasterKeyFile, previousVaultTransitKeyName);
 	}
 
 	private static void requireNonEmpty(String value, String propertyName) {
@@ -149,5 +184,17 @@ public class EncryptedFileDataStoreFactory {
 
 	public void setVaultTransitKeyName(String vaultTransitKeyName) {
 		this.vaultTransitKeyName = vaultTransitKeyName;
+	}
+
+	public void setPreviousKeyId(String previousKeyId) {
+		this.previousKeyId = previousKeyId;
+	}
+
+	public void setPreviousLocalMasterKeyFile(String previousLocalMasterKeyFile) {
+		this.previousLocalMasterKeyFile = previousLocalMasterKeyFile;
+	}
+
+	public void setPreviousVaultTransitKeyName(String previousVaultTransitKeyName) {
+		this.previousVaultTransitKeyName = previousVaultTransitKeyName;
 	}
 }

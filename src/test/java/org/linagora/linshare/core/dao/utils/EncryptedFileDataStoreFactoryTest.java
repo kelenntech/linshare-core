@@ -15,6 +15,7 @@
  */
 package org.linagora.linshare.core.dao.utils;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -170,6 +171,87 @@ class EncryptedFileDataStoreFactoryTest {
 		factory.setKeyProvider("vault");
 		factory.setVaultTokenFile(tokenFile.toString());
 		// vaultAddress and vaultTransitKeyName deliberately left unset.
+
+		assertThrows(EncryptedBlobKeyException.class, factory::getDefault);
+	}
+
+	@Test
+	void omittingPreviousKeyIdLeavesRotationUnconfigured(@TempDir Path tempDir) throws Exception {
+		Path keyFile = tempDir.resolve("master.key");
+		Files.write(keyFile, new byte[32]);
+
+		FileDataStore delegate = mock(FileDataStore.class);
+		EncryptedFileDataStoreFactory factory = new EncryptedFileDataStoreFactory();
+		factory.setDelegate(delegate);
+		factory.setWriteEnabled(true);
+		factory.setReadEnabled(true);
+		factory.setKeyProvider("local");
+		factory.setLocalMasterKeyFile(keyFile.toString());
+		factory.setKeyId("test-kek");
+		// previousKeyId deliberately left unset.
+
+		EncryptedFileDataStoreImpl store = (EncryptedFileDataStoreImpl) factory.getDefault();
+
+		assertFalse(store.isRotationConfigured());
+	}
+
+	@Test
+	void previousKeyIdConfiguresRotation(@TempDir Path tempDir) throws Exception {
+		Path keyFile = tempDir.resolve("master.key");
+		Files.write(keyFile, new byte[32]);
+		Path previousKeyFile = tempDir.resolve("previous-master.key");
+		Files.write(previousKeyFile, new byte[32]);
+
+		FileDataStore delegate = mock(FileDataStore.class);
+		EncryptedFileDataStoreFactory factory = new EncryptedFileDataStoreFactory();
+		factory.setDelegate(delegate);
+		factory.setWriteEnabled(true);
+		factory.setReadEnabled(true);
+		factory.setKeyProvider("local");
+		factory.setLocalMasterKeyFile(keyFile.toString());
+		factory.setKeyId("test-kek");
+		factory.setPreviousKeyId("previous-test-kek");
+		factory.setPreviousLocalMasterKeyFile(previousKeyFile.toString());
+
+		EncryptedFileDataStoreImpl store = (EncryptedFileDataStoreImpl) factory.getDefault();
+
+		assertTrue(store.isRotationConfigured());
+	}
+
+	@Test
+	void failsClosedWhenPreviousKeyIdEqualsKeyId(@TempDir Path tempDir) throws Exception {
+		Path keyFile = tempDir.resolve("master.key");
+		Files.write(keyFile, new byte[32]);
+
+		FileDataStore delegate = mock(FileDataStore.class);
+		EncryptedFileDataStoreFactory factory = new EncryptedFileDataStoreFactory();
+		factory.setDelegate(delegate);
+		factory.setWriteEnabled(true);
+		factory.setReadEnabled(true);
+		factory.setKeyProvider("local");
+		factory.setLocalMasterKeyFile(keyFile.toString());
+		factory.setKeyId("test-kek");
+		factory.setPreviousKeyId("test-kek");
+		factory.setPreviousLocalMasterKeyFile(keyFile.toString());
+
+		assertThrows(EncryptedBlobKeyException.class, factory::getDefault);
+	}
+
+	@Test
+	void failsClosedWhenPreviousKeyIdSetButPreviousMasterKeyFileIsMissing(@TempDir Path tempDir) throws Exception {
+		Path keyFile = tempDir.resolve("master.key");
+		Files.write(keyFile, new byte[32]);
+
+		FileDataStore delegate = mock(FileDataStore.class);
+		EncryptedFileDataStoreFactory factory = new EncryptedFileDataStoreFactory();
+		factory.setDelegate(delegate);
+		factory.setWriteEnabled(true);
+		factory.setReadEnabled(true);
+		factory.setKeyProvider("local");
+		factory.setLocalMasterKeyFile(keyFile.toString());
+		factory.setKeyId("test-kek");
+		factory.setPreviousKeyId("previous-test-kek");
+		// previousLocalMasterKeyFile deliberately left unset.
 
 		assertThrows(EncryptedBlobKeyException.class, factory::getDefault);
 	}

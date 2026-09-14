@@ -67,7 +67,7 @@ class EncryptedFileDataStoreImplTest {
 		ByteSource byteSource = ByteSource.wrap(new byte[] { 1, 2, 3, 4, 5 });
 
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(delegate, newKeyService(),
-				smallChunkParams(), false, false, true);
+				smallChunkParams(), false, false, true, null, null);
 		FileMetaData result = store.add(byteSource, metadata);
 
 		verify(delegate).add(byteSource, metadata);
@@ -82,7 +82,7 @@ class EncryptedFileDataStoreImplTest {
 		when(delegate.get(metadata)).thenReturn(delegateSource);
 
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(delegate, newKeyService(),
-				smallChunkParams(), false, false, true);
+				smallChunkParams(), false, false, true, null, null);
 
 		assertSame(delegateSource, store.get(metadata));
 	}
@@ -92,7 +92,46 @@ class EncryptedFileDataStoreImplTest {
 		FileDataStore delegate = mock(FileDataStore.class);
 
 		assertThrows(IllegalArgumentException.class, () -> new EncryptedFileDataStoreImpl(delegate, newKeyService(),
-				smallChunkParams(), true, false, true));
+				smallChunkParams(), true, false, true, null, null));
+	}
+
+	@Test
+	void isRotationConfiguredReflectsWhetherAKekRotatorWasSupplied() {
+		FileDataStore delegate = mock(FileDataStore.class);
+		KekRotator kekRotator = mock(KekRotator.class);
+
+		EncryptedFileDataStoreImpl withoutRotator = new EncryptedFileDataStoreImpl(delegate, newKeyService(),
+				smallChunkParams(), true, true, true, "current-kek", null);
+		EncryptedFileDataStoreImpl withRotator = new EncryptedFileDataStoreImpl(delegate, newKeyService(),
+				smallChunkParams(), true, true, true, "current-kek", kekRotator);
+
+		assertEquals(false, withoutRotator.isRotationConfigured());
+		assertEquals(true, withRotator.isRotationConfigured());
+	}
+
+	@Test
+	void rotateKekDelegatesToTheConfiguredKekRotatorWithTheCurrentKeyId() throws IOException {
+		FileDataStore delegate = mock(FileDataStore.class);
+		KekRotator kekRotator = mock(KekRotator.class);
+		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "text/plain", 5L, "f.txt");
+		when(kekRotator.rotate(metadata, "current-kek")).thenReturn(RotationOutcome.ROTATED);
+
+		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(delegate, newKeyService(),
+				smallChunkParams(), true, true, true, "current-kek", kekRotator);
+
+		assertEquals(RotationOutcome.ROTATED, store.rotateKek(metadata));
+		verify(kekRotator).rotate(metadata, "current-kek");
+	}
+
+	@Test
+	void rotateKekThrowsWhenNoRotatorIsConfigured() {
+		FileDataStore delegate = mock(FileDataStore.class);
+		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "text/plain", 5L, "f.txt");
+
+		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(delegate, newKeyService(),
+				smallChunkParams(), true, true, true, "current-kek", null);
+
+		assertThrows(IllegalStateException.class, () -> store.rotateKek(metadata));
 	}
 
 	@Test
@@ -102,7 +141,7 @@ class EncryptedFileDataStoreImplTest {
 		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "text/plain", 3L, "f.txt");
 
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(delegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 
 		store.remove(metadata);
 		verify(delegate).remove(metadata);
@@ -131,7 +170,7 @@ class EncryptedFileDataStoreImplTest {
 				(long) plaintext.length, "f.bin");
 
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(delegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 		FileMetaData returned = store.add(ByteSource.wrap(plaintext), originalMetadata);
 
 		assertSame(originalMetadata, returned);
@@ -153,7 +192,7 @@ class EncryptedFileDataStoreImplTest {
 				(long) plaintext.length, "f.bin");
 
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(fakeDelegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 		store.add(ByteSource.wrap(plaintext), metadata);
 
 		byte[] roundTripped;
@@ -175,11 +214,11 @@ class EncryptedFileDataStoreImplTest {
 		// true, before writes were later disabled (e.g. a rollback that must
 		// still be able to serve already-encrypted blobs).
 		EncryptedFileDataStoreImpl writer = new EncryptedFileDataStoreImpl(fakeDelegate, keyService,
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 		writer.add(ByteSource.wrap(plaintext), metadata);
 
 		EncryptedFileDataStoreImpl readOnlyStore = new EncryptedFileDataStoreImpl(fakeDelegate, keyService,
-				smallChunkParams(), false, true, true);
+				smallChunkParams(), false, true, true, null, null);
 
 		byte[] result;
 		try (InputStream in = readOnlyStore.get(metadata).openStream()) {
@@ -196,7 +235,7 @@ class EncryptedFileDataStoreImplTest {
 				"f.txt");
 
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(fakeDelegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 		store.add(ByteSource.wrap(plaintext), metadata);
 
 		byte[] persisted = fakeDelegate.rawBytes(metadata.getUuid());
@@ -215,7 +254,7 @@ class EncryptedFileDataStoreImplTest {
 		fakeDelegate.putRaw(metadata.getUuid(), legacyPlaintext);
 
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(fakeDelegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 
 		byte[] result;
 		try (InputStream in = store.get(metadata).openStream()) {
@@ -234,7 +273,7 @@ class EncryptedFileDataStoreImplTest {
 		fakeDelegate.putRaw(metadata.getUuid(), legacyPlaintext);
 
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(fakeDelegate, newKeyService(),
-				smallChunkParams(), true, true, false);
+				smallChunkParams(), true, true, false, null, null);
 
 		assertThrows(EncryptedBlobFormatException.class, () -> store.get(metadata).openStream());
 	}
@@ -247,7 +286,7 @@ class EncryptedFileDataStoreImplTest {
 				(long) plaintext.length, "f.bin");
 
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(fakeDelegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 		store.add(ByteSource.wrap(plaintext), metadata);
 
 		byte[] corrupted = fakeDelegate.rawBytes(metadata.getUuid());
@@ -269,7 +308,7 @@ class EncryptedFileDataStoreImplTest {
 		when(delegate.getRange(metadata, 2, 2)).thenReturn(delegateSlice);
 
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(delegate, newKeyService(),
-				smallChunkParams(), false, false, true);
+				smallChunkParams(), false, false, true, null, null);
 
 		assertSame(delegateSlice, store.getRange(metadata, 2, 2));
 	}
@@ -281,7 +320,7 @@ class EncryptedFileDataStoreImplTest {
 		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream",
 				(long) plaintext.length, "f.bin");
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(fakeDelegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 		store.add(ByteSource.wrap(plaintext), metadata);
 
 		byte[] result;
@@ -332,7 +371,7 @@ class EncryptedFileDataStoreImplTest {
 		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream",
 				(long) plaintext.length, "f.bin");
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(fakeDelegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 		store.add(ByteSource.wrap(plaintext), metadata);
 
 		byte[] expected = java.util.Arrays.copyOfRange(plaintext, (int) offset, (int) (offset + length));
@@ -350,7 +389,7 @@ class EncryptedFileDataStoreImplTest {
 		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream",
 				(long) plaintext.length, "f.bin");
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(fakeDelegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 		store.add(ByteSource.wrap(plaintext), metadata);
 
 		assertThrows(IllegalArgumentException.class,
@@ -367,7 +406,7 @@ class EncryptedFileDataStoreImplTest {
 		fakeDelegate.putRaw(metadata.getUuid(), legacyPlaintext);
 
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(fakeDelegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 
 		byte[] result;
 		try (InputStream in = store.getRange(metadata, 10, 20).openStream()) {
@@ -383,7 +422,7 @@ class EncryptedFileDataStoreImplTest {
 		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream",
 				(long) plaintext.length, "f.bin");
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(fakeDelegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 		store.add(ByteSource.wrap(plaintext), metadata);
 
 		// Flip the last physical byte, which belongs to the final chunk's tag —
@@ -412,7 +451,7 @@ class EncryptedFileDataStoreImplTest {
 		FileMetaData sourceMetadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream",
 				(long) plaintext.length, "source.bin");
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(fakeDelegate, newKeyService(),
-				smallChunkParams(), true, true, true);
+				smallChunkParams(), true, true, true, null, null);
 		store.add(ByteSource.wrap(plaintext), sourceMetadata);
 
 		ByteSource sourceByteSource = store.get(sourceMetadata);
