@@ -26,6 +26,7 @@ import org.apache.commons.lang3.Validate;
 import org.jclouds.ContextBuilder;
 import org.jclouds.blobstore.BlobStore;
 import org.jclouds.blobstore.BlobStoreContext;
+import org.linagora.linshare.core.domain.objects.FileMetaData;
 
 import com.google.inject.Module;
 
@@ -64,10 +65,10 @@ public class FileSystemJcloudFileDataStoreImpl extends AbstractJcloudFileDataSto
 	 * (baseDirectory/container/key, no further nesting or key transformation).
 	 */
 	@Override
-	public void atomicReplace(String container, String sourceKey, String targetKey) throws IOException {
-		Path source = resolveBlobPath(container, sourceKey);
-		Path target = resolveBlobPath(container, targetKey);
-		Files.move(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+	public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
+		Path sourcePath = resolveBlobPath(target.getBucketUuid(), source.getUuid());
+		Path targetPath = resolveBlobPath(target.getBucketUuid(), target.getUuid());
+		Files.move(sourcePath, targetPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
 	}
 
 	private Path resolveBlobPath(String container, String key) {

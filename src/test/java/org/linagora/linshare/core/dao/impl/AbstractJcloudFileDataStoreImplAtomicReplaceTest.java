@@ -67,18 +67,17 @@ class AbstractJcloudFileDataStoreImplAtomicReplaceTest {
 				"source.bin");
 		FileMetaData stored = store.add(ByteSource.wrap(content), sourceMetadata);
 
-		store.atomicReplace("test-bucket", stored.getUuid(), "target-key");
+		FileMetaData targetMetadata = new FileMetaData(FileMetaDataKind.DATA, "text/plain", (long) content.length,
+				"target.bin");
+		targetMetadata.setUuid("target-key");
+		targetMetadata.setBucketUuid("test-bucket");
+		store.atomicReplace(stored, targetMetadata);
 
 		FileMetaData sourceLookup = new FileMetaData(FileMetaDataKind.DATA, "text/plain", (long) content.length,
 				"source.bin");
 		sourceLookup.setUuid(stored.getUuid());
 		sourceLookup.setBucketUuid("test-bucket");
 		assertFalse(store.exists(sourceLookup), "source key must no longer exist after atomicReplace");
-
-		FileMetaData targetMetadata = new FileMetaData(FileMetaDataKind.DATA, "text/plain", (long) content.length,
-				"target.bin");
-		targetMetadata.setUuid("target-key");
-		targetMetadata.setBucketUuid("test-bucket");
 		byte[] copied;
 		try (InputStream in = store.get(targetMetadata).openStream()) {
 			copied = ByteStreams.toByteArray(in);
@@ -101,12 +100,11 @@ class AbstractJcloudFileDataStoreImplAtomicReplaceTest {
 				"new.bin");
 		FileMetaData storedSource = store.add(ByteSource.wrap(newContent), source);
 
-		store.atomicReplace("test-bucket", storedSource.getUuid(), "target-key");
-
 		FileMetaData targetMetadata = new FileMetaData(FileMetaDataKind.DATA, "text/plain",
 				(long) newContent.length, "target.bin");
 		targetMetadata.setUuid("target-key");
 		targetMetadata.setBucketUuid("test-bucket");
+		store.atomicReplace(storedSource, targetMetadata);
 		byte[] result;
 		try (InputStream in = store.get(targetMetadata).openStream()) {
 			result = ByteStreams.toByteArray(in);
@@ -117,8 +115,14 @@ class AbstractJcloudFileDataStoreImplAtomicReplaceTest {
 	@Test
 	void genericAtomicReplaceFailsWhenSourceIsMissing() {
 		store = new TransientJcloudStore("test-bucket");
+		FileMetaData missingSource = new FileMetaData(FileMetaDataKind.DATA, "text/plain", 0L, "source.bin");
+		missingSource.setUuid("no-such-source");
+		missingSource.setBucketUuid("test-bucket");
+		FileMetaData targetMetadata = new FileMetaData(FileMetaDataKind.DATA, "text/plain", 0L, "target.bin");
+		targetMetadata.setUuid("target-key");
+		targetMetadata.setBucketUuid("test-bucket");
 
-		assertThrows(Exception.class, () -> store.atomicReplace("test-bucket", "no-such-source", "target-key"));
+		assertThrows(Exception.class, () -> store.atomicReplace(missingSource, targetMetadata));
 	}
 
 	/** Minimal concrete subclass wiring the offline jclouds "transient" provider, for testing the base class's generic path directly. */

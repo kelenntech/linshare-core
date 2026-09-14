@@ -17,6 +17,8 @@ package org.linagora.linshare.core.dao;
 
 import java.io.IOException;
 
+import org.linagora.linshare.core.domain.objects.FileMetaData;
+
 /**
  * Optional capability a {@link FileDataStore} backend may implement when it
  * can atomically replace one physical blob with another already-stored one.
@@ -27,12 +29,22 @@ import java.io.IOException;
 public interface AtomicBlobReplace {
 
 	/**
-	 * Atomically makes {@code targetKey} contain exactly the bytes currently
-	 * stored at {@code sourceKey} (in the same {@code container}), replacing
-	 * whatever was previously at {@code targetKey}. On successful return,
-	 * {@code sourceKey} no longer exists. A reader of {@code targetKey} must
-	 * never observe a partially-written result, whether this call succeeds,
-	 * fails, or the process crashes during it.
+	 * Atomically makes {@code target}'s uuid contain exactly the bytes
+	 * currently stored at {@code source}'s uuid, replacing whatever was
+	 * previously there. On successful return, {@code source} no longer
+	 * exists. A reader of {@code target} must never observe a
+	 * partially-written result, whether this call succeeds, fails, or the
+	 * process crashes during it.
+	 *
+	 * <p>{@code source} and {@code target} always share the same
+	 * {@link FileMetaData#getKind()}; implementations that route by kind or
+	 * by backend may use either interchangeably, and {@code target}'s
+	 * {@link FileMetaData#getBucketUuid()} is the authoritative container.
+	 * Throw {@link IOException} — never an unchecked exception — when the
+	 * replacement cannot be performed (e.g. no backend supports it, or
+	 * {@code source}/{@code target} live on different backends): callers
+	 * such as the nightly encryption-migration batch only treat a checked
+	 * {@link IOException} as a per-document, retryable failure.
 	 */
-	void atomicReplace(String container, String sourceKey, String targetKey) throws IOException;
+	void atomicReplace(FileMetaData source, FileMetaData target) throws IOException;
 }

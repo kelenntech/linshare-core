@@ -17,13 +17,14 @@ package org.linagora.linshare.core.dao.impl;
 
 import java.io.IOException;
 
+import org.linagora.linshare.core.dao.AtomicBlobReplace;
 import org.linagora.linshare.core.dao.FileDataStore;
 import org.linagora.linshare.core.domain.constants.FileMetaDataKind;
 import org.linagora.linshare.core.domain.objects.FileMetaData;
 
 import com.google.common.io.ByteSource;
 
-public class DataKindBalancerFileDataStoreImpl implements FileDataStore {
+public class DataKindBalancerFileDataStoreImpl implements FileDataStore, AtomicBlobReplace {
 
 	private FileDataStore bigFilesDataStore;
 
@@ -68,6 +69,17 @@ public class DataKindBalancerFileDataStoreImpl implements FileDataStore {
 			return bigFilesDataStore.exists(metadata);
 		} else {
 			return smallFilesDataStore.exists(metadata);
+		}
+	}
+
+	@Override
+	public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
+		FileDataStore store = target.getKind().equals(FileMetaDataKind.DATA) ? bigFilesDataStore
+				: smallFilesDataStore;
+		if (store instanceof AtomicBlobReplace) {
+			((AtomicBlobReplace) store).atomicReplace(source, target);
+		} else {
+			throw new IOException("backing FileDataStore does not support atomic replace");
 		}
 	}
 

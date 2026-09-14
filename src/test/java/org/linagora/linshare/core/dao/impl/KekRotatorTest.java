@@ -345,13 +345,13 @@ class KekRotatorTest {
 		boolean atomicReplaceWasCalled;
 
 		@Override
-		public void atomicReplace(String container, String sourceKey, String targetKey) throws IOException {
+		public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
 			atomicReplaceWasCalled = true;
-			byte[] sourceBytes = blobs.remove(key(container, sourceKey));
+			byte[] sourceBytes = blobs.remove(key(source.getBucketUuid(), source.getUuid()));
 			if (sourceBytes == null) {
-				throw new IOException("no such source blob: " + sourceKey);
+				throw new IOException("no such source blob: " + source.getUuid());
 			}
-			blobs.put(key(container, targetKey), sourceBytes);
+			blobs.put(key(target.getBucketUuid(), target.getUuid()), sourceBytes);
 		}
 	}
 

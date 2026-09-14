@@ -17,8 +17,12 @@ package org.linagora.linshare.core.dao.impl;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
+import org.bson.types.ObjectId;
+import org.linagora.linshare.core.dao.AtomicBlobReplace;
 import org.linagora.linshare.core.dao.FileDataStore;
 import org.linagora.linshare.core.domain.objects.FileMetaData;
 import org.linagora.linshare.core.exception.TechnicalErrorCode;
@@ -42,7 +46,7 @@ import com.mongodb.client.gridfs.GridFSDownloadStream;
 import com.mongodb.client.gridfs.GridFSFindIterable;
 import com.mongodb.client.gridfs.model.GridFSFile;
 
-public class MongoFileDataStoreImpl implements FileDataStore {
+public class MongoFileDataStoreImpl implements FileDataStore, AtomicBlobReplace {
 
 	private static final Logger logger = LoggerFactory.getLogger(MongoFileDataStoreImpl.class);
 
@@ -129,5 +133,45 @@ public class MongoFileDataStoreImpl implements FileDataStore {
 	private GridFSBucket getGridFs() {
 		MongoDatabase db = mongoDbFactory.getMongoDatabase();
 		return GridFSBuckets.create(db);
+	}
+
+	private Query uuidQuery(String uuid) {
+		return new Query().addCriteria(Criteria.where("metadata.uuid").is(uuid));
+	}
+
+	/**
+	 * GridFS has no native "replace contents at an existing key" primitive:
+	 * add() always inserts a new document, it never overwrites by uuid. So
+	 * the new document is inserted under target's uuid first, and only the
+	 * document(s) previously holding that uuid (captured beforehand, so the
+	 * one just inserted is never touched) are removed afterward — a reader
+	 * of target's uuid always finds at least one valid document, at worst
+	 * transiently two, but never zero.
+	 */
+	@Override
+	public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
+		Query sourceQuery = uuidQuery(source.getUuid());
+		GridFSFindIterable sourceFind = gridOperations.find(sourceQuery);
+		checkNotTooMany(source, sourceFind);
+		GridFSFile sourceFile = sourceFind.first();
+		if (sourceFile == null) {
+			throw new IOException("no such source blob: " + source.getUuid());
+		}
+
+		List<ObjectId> staleTargetIds = new ArrayList<>();
+		for (GridFSFile file : gridOperations.find(uuidQuery(target.getUuid()))) {
+			staleTargetIds.add(file.getObjectId());
+		}
+
+		DBObject meta = new BasicDBObject();
+		meta.put("uuid", target.getUuid());
+		try (GridFSDownloadStream in = getGridFs().openDownloadStream(sourceFile.getObjectId())) {
+			gridOperations.store(in, target.getFileName(), target.getMimeType(), meta);
+		}
+
+		if (!staleTargetIds.isEmpty()) {
+			gridOperations.delete(new Query().addCriteria(Criteria.where("_id").in(staleTargetIds)));
+		}
+		gridOperations.delete(sourceQuery);
 	}
 }

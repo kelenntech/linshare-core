@@ -169,8 +169,7 @@ public class EncryptedBlobMigrator {
 
 	private void commit(FileMetaData tempMetadata, FileMetaData realMetadata) throws IOException {
 		if (delegate instanceof AtomicBlobReplace) {
-			((AtomicBlobReplace) delegate).atomicReplace(realMetadata.getBucketUuid(), tempMetadata.getUuid(),
-					realMetadata.getUuid());
+			((AtomicBlobReplace) delegate).atomicReplace(tempMetadata, realMetadata);
 			return;
 		}
 		// Best-effort fallback for backends without an atomic primitive: safe

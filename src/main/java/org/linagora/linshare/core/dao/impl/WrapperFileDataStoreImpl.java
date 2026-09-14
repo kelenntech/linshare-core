@@ -17,12 +17,13 @@ package org.linagora.linshare.core.dao.impl;
 
 import java.io.IOException;
 
+import org.linagora.linshare.core.dao.AtomicBlobReplace;
 import org.linagora.linshare.core.dao.FileDataStore;
 import org.linagora.linshare.core.domain.objects.FileMetaData;
 
 import com.google.common.io.ByteSource;
 
-public class WrapperFileDataStoreImpl implements FileDataStore {
+public class WrapperFileDataStoreImpl implements FileDataStore, AtomicBlobReplace {
 
 	private FileDataStore fileDataStore;
 
@@ -49,6 +50,15 @@ public class WrapperFileDataStoreImpl implements FileDataStore {
 	@Override
 	public boolean exists(FileMetaData metadata) {
 		return fileDataStore.exists(metadata);
+	}
+
+	@Override
+	public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
+		if (fileDataStore instanceof AtomicBlobReplace) {
+			((AtomicBlobReplace) fileDataStore).atomicReplace(source, target);
+		} else {
+			throw new IOException("wrapped FileDataStore does not support atomic replace");
+		}
 	}
 
 }

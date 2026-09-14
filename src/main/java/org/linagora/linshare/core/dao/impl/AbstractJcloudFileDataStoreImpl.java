@@ -190,10 +190,11 @@ public abstract class AbstractJcloudFileDataStoreImpl
 	 * to that key would have.
 	 */
 	@Override
-	public void atomicReplace(String container, String sourceKey, String targetKey) throws IOException {
+	public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
+		String container = target.getBucketUuid();
 		BlobStore blobStore = getBlobStore(container);
-		blobStore.copyBlob(container, sourceKey, container, targetKey, CopyOptions.NONE);
-		blobStore.removeBlob(container, sourceKey);
+		blobStore.copyBlob(container, source.getUuid(), container, target.getUuid(), CopyOptions.NONE);
+		blobStore.removeBlob(container, source.getUuid());
 	}
 
 	@Override

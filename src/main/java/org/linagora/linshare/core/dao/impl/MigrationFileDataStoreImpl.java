@@ -17,12 +17,13 @@ package org.linagora.linshare.core.dao.impl;
 
 import java.io.IOException;
 
+import org.linagora.linshare.core.dao.AtomicBlobReplace;
 import org.linagora.linshare.core.dao.FileDataStore;
 import org.linagora.linshare.core.domain.objects.FileMetaData;
 
 import com.google.common.io.ByteSource;
 
-public class MigrationFileDataStoreImpl implements FileDataStore {
+public class MigrationFileDataStoreImpl implements FileDataStore, AtomicBlobReplace {
 
 	private FileDataStore newDataStore;
 
@@ -67,6 +68,22 @@ public class MigrationFileDataStoreImpl implements FileDataStore {
 			return true;
 		} else {
 			return oldDataStore.exists(metadata);
+		}
+	}
+
+	@Override
+	public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
+		boolean sourceInNew = newDataStore.exists(source);
+		boolean targetInNew = newDataStore.exists(target);
+		if (sourceInNew != targetInNew) {
+			throw new IOException("source and target blobs live on different storage backends "
+					+ "during the gridfs-to-jcloud storage migration; cannot atomically replace across backends");
+		}
+		FileDataStore store = sourceInNew ? newDataStore : oldDataStore;
+		if (store instanceof AtomicBlobReplace) {
+			((AtomicBlobReplace) store).atomicReplace(source, target);
+		} else {
+			throw new IOException("backing FileDataStore does not support atomic replace");
 		}
 	}
 

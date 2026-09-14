@@ -193,8 +193,7 @@ public class KekRotator {
 
 	private void commit(FileMetaData tempMetadata, FileMetaData realMetadata) throws IOException {
 		if (delegate instanceof AtomicBlobReplace) {
-			((AtomicBlobReplace) delegate).atomicReplace(realMetadata.getBucketUuid(), tempMetadata.getUuid(),
-					realMetadata.getUuid());
+			((AtomicBlobReplace) delegate).atomicReplace(tempMetadata, realMetadata);
 			return;
 		}
 		long physicalSize = physicalSizeOf(tempMetadata);
