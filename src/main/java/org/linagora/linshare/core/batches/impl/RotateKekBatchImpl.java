@@ -95,14 +95,45 @@ public class RotateKekBatchImpl extends GenericBatchImpl {
 		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, document);
 		try {
 			RotationOutcome outcome = encryptedStore.rotateKek(metadata);
-			console.logDebug(batchRunContext, total, position, "Document {} rotation outcome: {}", identifier,
-					outcome);
+			logOutcome(batchRunContext, total, position, identifier, outcome);
 			context.setProcessed(outcome == RotationOutcome.ROTATED);
 		} catch (IOException e) {
 			throw new BatchBusinessException(context,
 					"Failed to rotate key for document " + identifier + ": " + e.getMessage());
 		}
 		return context;
+	}
+
+	/**
+	 * {@code MISSING}/{@code WRAPPED_KEY_TOO_LARGE}/{@code VERIFICATION_FAILED}
+	 * mean this document isn't converging to the current key on its own and
+	 * needs attention, unlike {@code ALREADY_ROTATED} (the everyday steady
+	 * state) — surfaced at WARN rather than DEBUG so they're actually
+	 * visible at default verbosity, matching how the bucketUuid-missing skip
+	 * above already logs (execute() never throws for a bad outcome, so
+	 * notifyError() can never fire for these).
+	 */
+	private void logOutcome(BatchRunContext batchRunContext, long total, long position, String identifier,
+			RotationOutcome outcome) {
+		switch (outcome) {
+		case MISSING:
+			console.logWarn(batchRunContext, total, position,
+					"Document {} blob could not be found in storage; rotation skipped.", identifier);
+			return;
+		case WRAPPED_KEY_TOO_LARGE:
+			console.logWarn(batchRunContext, total, position,
+					"Document {} could not be rotated: the new wrapped key does not fit within the blob's "
+							+ "reserved header capacity.", identifier);
+			return;
+		case VERIFICATION_FAILED:
+			console.logWarn(batchRunContext, total, position,
+					"Document {} failed post-rotation verification; blob was left under the previous key "
+							+ "and will be retried on the next run.", identifier);
+			return;
+		default:
+			console.logDebug(batchRunContext, total, position, "Document {} rotation outcome: {}", identifier,
+					outcome);
+		}
 	}
 
 	@Override

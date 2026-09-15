@@ -93,14 +93,40 @@ public class MigrateLegacyDocumentsBatchImpl extends GenericBatchImpl {
 		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, document);
 		try {
 			MigrationOutcome outcome = encryptedStore.migrateLegacyBlob(metadata, document.getSha256sum());
-			console.logDebug(batchRunContext, total, position, "Document {} migration outcome: {}", identifier,
-					outcome);
+			logOutcome(batchRunContext, total, position, identifier, outcome);
 			context.setProcessed(outcome == MigrationOutcome.MIGRATED);
 		} catch (IOException e) {
 			throw new BatchBusinessException(context,
 					"Failed to migrate document " + identifier + " to encrypted storage: " + e.getMessage());
 		}
 		return context;
+	}
+
+	/**
+	 * {@code MISSING}/{@code VERIFICATION_FAILED} mean this document isn't
+	 * converging to encrypted storage on its own and needs attention, unlike
+	 * {@code ALREADY_ENCRYPTED} (the everyday steady state) — surfaced at
+	 * WARN rather than DEBUG so they're actually visible at default
+	 * verbosity, matching how the bucketUuid-missing skip above already
+	 * logs (execute() never throws for a bad outcome, so notifyError() can
+	 * never fire for these).
+	 */
+	private void logOutcome(BatchRunContext batchRunContext, long total, long position, String identifier,
+			MigrationOutcome outcome) {
+		switch (outcome) {
+		case MISSING:
+			console.logWarn(batchRunContext, total, position,
+					"Document {} blob could not be found in storage; migration skipped.", identifier);
+			return;
+		case VERIFICATION_FAILED:
+			console.logWarn(batchRunContext, total, position,
+					"Document {} failed post-migration verification; blob was left untouched (still "
+							+ "plaintext) and will be retried on the next run.", identifier);
+			return;
+		default:
+			console.logDebug(batchRunContext, total, position, "Document {} migration outcome: {}", identifier,
+					outcome);
+		}
 	}
 
 	@Override

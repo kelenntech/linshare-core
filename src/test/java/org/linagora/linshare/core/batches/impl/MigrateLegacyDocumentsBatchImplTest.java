@@ -17,7 +17,6 @@ package org.linagora.linshare.core.batches.impl;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -27,24 +26,26 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
-import java.util.Collections;
-import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.linagora.linshare.core.batches.utils.BatchConsole;
-import org.linagora.linshare.core.dao.FileDataStore;
 import org.linagora.linshare.core.dao.impl.EncryptedFileDataStoreImpl;
-import org.linagora.linshare.core.dao.impl.RotationOutcome;
+import org.linagora.linshare.core.dao.impl.MigrationOutcome;
 import org.linagora.linshare.core.domain.entities.Account;
 import org.linagora.linshare.core.domain.entities.Document;
 import org.linagora.linshare.core.domain.objects.FileMetaData;
 import org.linagora.linshare.core.exception.BatchBusinessException;
 import org.linagora.linshare.core.job.quartz.BatchRunContext;
-import org.linagora.linshare.core.job.quartz.ResultContext;
 import org.linagora.linshare.core.repository.AccountRepository;
 import org.linagora.linshare.core.repository.DocumentRepository;
 
-class RotateKekBatchImplTest {
+/**
+ * Focused on the WARN-level logging fix: MISSING/VERIFICATION_FAILED must
+ * be visible at default log verbosity, unlike the everyday ALREADY_ENCRYPTED
+ * no-op, since execute() never throws for a bad outcome so notifyError()
+ * can never fire for these (see MigrateLegacyDocumentsBatchImpl#logOutcome).
+ */
+class MigrateLegacyDocumentsBatchImplTest {
 
 	@SuppressWarnings("unchecked")
 	private final AccountRepository<Account> accountRepository = mock(AccountRepository.class);
@@ -62,60 +63,21 @@ class RotateKekBatchImplTest {
 		return document;
 	}
 
-	@Test
-	void needToRunIsFalseWhenStoreIsNotEncrypted() {
-		FileDataStore fileDataStore = mock(FileDataStore.class);
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
-
-		assertEquals(false, batch.needToRun());
-		assertEquals(Collections.emptyList(), batch.getAll(mock(BatchRunContext.class)));
+	private MigrateLegacyDocumentsBatchImpl newBatch(EncryptedFileDataStoreImpl fileDataStore) {
+		return new MigrateLegacyDocumentsBatchImpl(accountRepository, documentRepository, fileDataStore);
 	}
 
 	@Test
-	void needToRunIsFalseWhenEncryptedButRotationNotConfigured() {
+	void executeMarksProcessedWhenOutcomeIsMigrated() throws Exception {
 		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
-		when(fileDataStore.isRotationConfigured()).thenReturn(false);
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
-
-		assertEquals(false, batch.needToRun());
-	}
-
-	@Test
-	void needToRunIsTrueWhenEncryptedAndRotationConfigured() {
-		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
-		when(fileDataStore.isRotationConfigured()).thenReturn(true);
-		when(documentRepository.findAllIdentifiers()).thenReturn(List.of("doc-1"));
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
-
-		assertTrue(batch.needToRun());
-		assertEquals(List.of("doc-1"), batch.getAll(mock(BatchRunContext.class)));
-	}
-
-	@Test
-	void executeMarksProcessedWhenOutcomeIsRotated() throws Exception {
-		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
-		when(fileDataStore.isRotationConfigured()).thenReturn(true);
-		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.ROTATED);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any())).thenReturn(MigrationOutcome.MIGRATED);
 		Document document = documentWithBucket("doc-1");
 		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
 
-		ResultContext context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+		var context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
 
 		assertEquals(true, context.getProcessed());
-	}
-
-	@Test
-	void executeMarksUnprocessedWhenOutcomeIsAlreadyRotated() throws Exception {
-		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
-		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.ALREADY_ROTATED);
-		Document document = documentWithBucket("doc-1");
-		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
-
-		ResultContext context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
-
-		assertEquals(false, context.getProcessed());
 	}
 
 	@Test
@@ -124,35 +86,32 @@ class RotateKekBatchImplTest {
 		Document document = new Document();
 		document.setUuid("doc-1");
 		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
 
-		ResultContext context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+		var context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
 
 		assertEquals(false, context.getProcessed());
 	}
 
 	@Test
-	void executeLogsWarnWhenBlobIsMissing() throws Exception {
+	void executeWrapsIOExceptionAsBatchBusinessException() throws Exception {
 		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
-		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.MISSING);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any())).thenThrow(new IOException("boom"));
 		Document document = documentWithBucket("doc-1");
 		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
-		BatchConsole console = mock(BatchConsole.class);
-		batch.setConsole(console);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
 
-		batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
-
-		verify(console).logWarn(any(BatchRunContext.class), eq(1L), eq(0L), any(), eq("doc-1"));
+		assertThrows(BatchBusinessException.class,
+				() -> batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0));
 	}
 
 	@Test
-	void executeLogsWarnWhenWrappedKeyIsTooLarge() throws Exception {
+	void executeLogsWarnWhenBlobIsMissing() throws Exception {
 		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
-		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.WRAPPED_KEY_TOO_LARGE);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any())).thenReturn(MigrationOutcome.MISSING);
 		Document document = documentWithBucket("doc-1");
 		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
 		BatchConsole console = mock(BatchConsole.class);
 		batch.setConsole(console);
 
@@ -164,10 +123,11 @@ class RotateKekBatchImplTest {
 	@Test
 	void executeLogsWarnWhenVerificationFails() throws Exception {
 		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
-		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.VERIFICATION_FAILED);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any()))
+				.thenReturn(MigrationOutcome.VERIFICATION_FAILED);
 		Document document = documentWithBucket("doc-1");
 		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
 		BatchConsole console = mock(BatchConsole.class);
 		batch.setConsole(console);
 
@@ -177,12 +137,13 @@ class RotateKekBatchImplTest {
 	}
 
 	@Test
-	void executeDoesNotLogWarnWhenAlreadyRotated() throws Exception {
+	void executeDoesNotLogWarnWhenAlreadyEncrypted() throws Exception {
 		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
-		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.ALREADY_ROTATED);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any()))
+				.thenReturn(MigrationOutcome.ALREADY_ENCRYPTED);
 		Document document = documentWithBucket("doc-1");
 		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
 		BatchConsole console = mock(BatchConsole.class);
 		batch.setConsole(console);
 
@@ -192,29 +153,17 @@ class RotateKekBatchImplTest {
 	}
 
 	@Test
-	void executeDoesNotLogWarnWhenRotated() throws Exception {
+	void executeDoesNotLogWarnWhenMigrated() throws Exception {
 		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
-		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.ROTATED);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any())).thenReturn(MigrationOutcome.MIGRATED);
 		Document document = documentWithBucket("doc-1");
 		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
 		BatchConsole console = mock(BatchConsole.class);
 		batch.setConsole(console);
 
 		batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
 
 		verify(console, never()).logWarn(any(BatchRunContext.class), anyLong(), anyLong(), any(), any());
-	}
-
-	@Test
-	void executeWrapsIOExceptionAsBatchBusinessException() throws Exception {
-		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
-		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenThrow(new IOException("boom"));
-		Document document = documentWithBucket("doc-1");
-		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
-		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
-
-		assertThrows(BatchBusinessException.class,
-				() -> batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0));
 	}
 }
