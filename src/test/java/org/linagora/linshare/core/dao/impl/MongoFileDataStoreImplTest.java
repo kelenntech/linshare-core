@@ -54,7 +54,10 @@ import com.mongodb.client.gridfs.model.GridFSFile;
  * reported corruption (docs/ARCH.md N/A — see the atomicReplace javadoc) —
  * insert the replacement under target's uuid, capture the *pre-existing*
  * target document(s) before that insert, and only then delete exactly those
- * plus the source, never the document just inserted. It does not exercise
+ * plus the source, never the document just inserted. It also covers the
+ * crash-safety layered on top: duplicates of one uuid (what an interrupted
+ * replace leaves) resolve to the newest copy, by generation first, and are
+ * cleaned up instead of failing every later access. It does not exercise
  * real GridFS wire behavior (this repo's embedded Mongo test tool explicitly
  * does not support GridFS); that was verified manually against a real
  * dockerized MongoDB during development of this fix.
@@ -97,6 +100,14 @@ class MongoFileDataStoreImplTest {
 		return new GridFSFile(new BsonObjectId(id), "f.bin", 5L, 261120, new Date(), new org.bson.Document());
 	}
 
+	private GridFSFile gridFsFile(ObjectId id, String fileName, Date uploadDate, Long generation) {
+		org.bson.Document metadata = new org.bson.Document();
+		if (generation != null) {
+			metadata.put("generation", generation);
+		}
+		return new GridFSFile(new BsonObjectId(id), fileName, 5L, 261120, uploadDate, metadata);
+	}
+
 	private GridFSFindIterable findIterableOf(GridFSFile... files) {
 		GridFSFindIterable iterable = mock(GridFSFindIterable.class);
 		when(iterable.iterator()).thenAnswer(inv -> cursorOf(files));
@@ -111,6 +122,13 @@ class MongoFileDataStoreImplTest {
 		when(cursor.hasNext()).thenAnswer(inv -> backing.hasNext());
 		when(cursor.next()).thenAnswer(inv -> backing.next());
 		return cursor;
+	}
+
+	// The iterable is built before the outer when(): findIterableOf() stubs
+	// mocks itself, and Mockito rejects a stubbing started inside another.
+	private void stubFind(String uuid, GridFSFile... files) {
+		GridFSFindIterable iterable = findIterableOf(files);
+		when(gridOperations.find(argThat(q -> queryTargetsUuid(q, uuid)))).thenReturn(iterable);
 	}
 
 	// Mockito probes argThat predicates with a null argument while a stub is
@@ -203,14 +221,165 @@ class MongoFileDataStoreImplTest {
 	}
 
 	@Test
-	void throwsWhenSourceIsAmbiguous() {
+	void usesTheNewestCopyWhenTheSourceIsDuplicated() throws IOException {
 		setUp();
+		ObjectId olderSourceId = new ObjectId();
+		ObjectId newerSourceId = new ObjectId();
 		FileMetaData source = metadata("dup-uuid", "source.bin");
 		FileMetaData target = metadata("target-uuid", "target.bin");
-		GridFSFindIterable ambiguousIterable = findIterableOf(gridFsFile(new ObjectId()), gridFsFile(new ObjectId()));
-		when(gridOperations.find(argThat(q -> queryTargetsUuid(q, "dup-uuid")))).thenReturn(ambiguousIterable);
+		GridFSFindIterable duplicated = findIterableOf(
+				gridFsFile(olderSourceId, "f.bin", new Date(1000), 0L),
+				gridFsFile(newerSourceId, "f.bin", new Date(2000), 1L));
+		when(gridOperations.find(argThat(q -> queryTargetsUuid(q, "dup-uuid")))).thenReturn(duplicated);
+		stubFind("target-uuid");
+		GridFSDownloadStream downloadStream = mock(GridFSDownloadStream.class);
+		when(bucket.openDownloadStream(newerSourceId)).thenReturn(downloadStream);
+
+		store.atomicReplace(source, target);
+
+		verify(gridOperations).store(eq(downloadStream), any(), any(), any(com.mongodb.DBObject.class));
+		verify(bucket, never()).openDownloadStream(olderSourceId);
+	}
+
+	@Test
+	void newTargetGetsAGenerationAboveEverythingItReplaces() throws IOException {
+		setUp();
+		ObjectId sourceId = new ObjectId();
+		FileMetaData source = metadata("source-uuid", "source.bin");
+		FileMetaData target = metadata("target-uuid", "target.bin");
+		stubFind("source-uuid", gridFsFile(sourceId));
+		stubFind("target-uuid", gridFsFile(new ObjectId(), "f.bin", new Date(1000), 2L),
+						gridFsFile(new ObjectId(), "f.bin", new Date(500), 1L));
+		when(bucket.openDownloadStream(sourceId)).thenReturn(mock(GridFSDownloadStream.class));
+
+		store.atomicReplace(source, target);
+
+		verify(gridOperations).store(any(), any(), any(),
+				argThat((com.mongodb.DBObject meta) -> Long.valueOf(3L).equals(meta.get("generation"))));
+	}
+
+	@Test
+	void firstTimeTargetStartsAtGenerationZero() throws IOException {
+		setUp();
+		ObjectId sourceId = new ObjectId();
+		stubFind("source-uuid", gridFsFile(sourceId));
+		stubFind("target-uuid");
+		when(bucket.openDownloadStream(sourceId)).thenReturn(mock(GridFSDownloadStream.class));
+
+		store.atomicReplace(metadata("source-uuid", "s.bin"), metadata("target-uuid", "t.bin"));
+
+		verify(gridOperations).store(any(), any(), any(),
+				argThat((com.mongodb.DBObject meta) -> Long.valueOf(0L).equals(meta.get("generation"))));
+	}
+
+	@Test
+	void replaceAfterAnInterruptedReplaceRemovesBothStaleCopies() throws IOException {
+		setUp();
+		ObjectId sourceId = new ObjectId();
+		ObjectId newerTargetId = new ObjectId();
+		ObjectId olderTargetId = new ObjectId();
+		stubFind("source-uuid", gridFsFile(sourceId));
+		// What an interrupted replace leaves behind: two documents, one uuid.
+		stubFind("target-uuid", gridFsFile(olderTargetId, "f.bin", new Date(1000), 0L),
+						gridFsFile(newerTargetId, "f.bin", new Date(2000), 1L));
+		when(bucket.openDownloadStream(sourceId)).thenReturn(mock(GridFSDownloadStream.class));
+
+		store.atomicReplace(metadata("source-uuid", "s.bin"), metadata("target-uuid", "t.bin"));
+
+		verify(gridOperations).delete(argThat(q -> queryDeletesIds(q, newerTargetId, olderTargetId)));
+		verify(gridOperations).store(any(), any(), any(),
+				argThat((com.mongodb.DBObject meta) -> Long.valueOf(2L).equals(meta.get("generation"))));
+	}
+
+	@Test
+	void keepsTheReplacedBlobsFileNameWhenTargetMetadataHasNone() throws IOException {
+		setUp();
+		ObjectId sourceId = new ObjectId();
+		stubFind("source-uuid", gridFsFile(sourceId, "temp-name", new Date(1000), null));
+		stubFind("target-uuid", gridFsFile(new ObjectId(), "original.png", new Date(500), null));
+		when(bucket.openDownloadStream(sourceId)).thenReturn(mock(GridFSDownloadStream.class));
+
+		store.atomicReplace(metadata("source-uuid", "s.bin"), metadata("target-uuid", null));
+
+		verify(gridOperations).store(any(), eq("original.png"), any(), any(com.mongodb.DBObject.class));
+	}
+
+	@Test
+	void neverPassesANullFileNameToGridFs() throws IOException {
+		setUp();
+		ObjectId sourceId = new ObjectId();
+		stubFind("source-uuid", gridFsFile(sourceId, "temp-name", new Date(1000), null));
+		stubFind("target-uuid");
+		when(bucket.openDownloadStream(sourceId)).thenReturn(mock(GridFSDownloadStream.class));
+
+		store.atomicReplace(metadata("source-uuid", "s.bin"), metadata("target-uuid", null));
+
+		verify(gridOperations).store(any(), eq("temp-name"), any(), any(com.mongodb.DBObject.class));
+	}
+
+	@Test
+	void getReadsTheNewestCopyAndDeletesTheOlderOnes() throws IOException {
+		setUp();
+		ObjectId olderId = new ObjectId();
+		ObjectId newerId = new ObjectId();
+		stubFind("dup-uuid", gridFsFile(olderId, "f.bin", new Date(1000), 0L),
+						gridFsFile(newerId, "f.bin", new Date(2000), 1L));
+		when(bucket.openDownloadStream(newerId)).thenReturn(mock(GridFSDownloadStream.class));
+
+		store.get(metadata("dup-uuid", "f.bin")).openStream();
+
+		verify(bucket).openDownloadStream(newerId);
+		verify(bucket, never()).openDownloadStream(olderId);
+		verify(gridOperations, org.mockito.Mockito.atLeastOnce())
+				.delete(argThat(q -> queryDeletesIds(q, olderId)));
+	}
+
+	@Test
+	void generationBeatsUploadDateWhenPickingTheNewestCopy() throws IOException {
+		setUp();
+		ObjectId replacementId = new ObjectId();
+		ObjectId originalId = new ObjectId();
+		// The replacement was written by a node whose clock is behind.
+		stubFind("dup-uuid", gridFsFile(originalId, "f.bin", new Date(5000), 0L),
+						gridFsFile(replacementId, "f.bin", new Date(1000), 1L));
+		when(bucket.openDownloadStream(replacementId)).thenReturn(mock(GridFSDownloadStream.class));
+
+		store.get(metadata("dup-uuid", "f.bin")).openStream();
+
+		verify(bucket).openDownloadStream(replacementId);
+	}
+
+	@Test
+	void aFailedCleanupOfStaleCopiesDoesNotFailTheRead() throws IOException {
+		setUp();
+		ObjectId olderId = new ObjectId();
+		ObjectId newerId = new ObjectId();
+		stubFind("dup-uuid", gridFsFile(olderId, "f.bin", new Date(1000), 0L),
+						gridFsFile(newerId, "f.bin", new Date(2000), 1L));
+		org.mockito.Mockito.doThrow(new RuntimeException("mongo down")).when(gridOperations)
+				.delete(argThat(q -> queryDeletesIds(q, olderId)));
+		when(bucket.openDownloadStream(newerId)).thenReturn(mock(GridFSDownloadStream.class));
+
+		store.get(metadata("dup-uuid", "f.bin")).openStream();
+
+		verify(bucket).openDownloadStream(newerId);
+	}
+
+	@Test
+	void getThrowsWhenNoCopyExists() {
+		setUp();
+		stubFind("missing-uuid");
 
 		assertThrows(org.linagora.linshare.core.exception.TechnicalException.class,
-				() -> store.atomicReplace(source, target));
+				() -> store.get(metadata("missing-uuid", "f.bin")));
+	}
+
+	@Test
+	void removeDeletesEveryCopyEvenWhenDuplicated() {
+		setUp();
+
+		store.remove(metadata("dup-uuid", "f.bin"));
+
+		verify(gridOperations).delete(argThat(q -> queryTargetsUuid(q, "dup-uuid")));
 	}
 }

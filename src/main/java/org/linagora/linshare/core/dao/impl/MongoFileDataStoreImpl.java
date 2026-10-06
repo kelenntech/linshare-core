@@ -18,6 +18,7 @@ package org.linagora.linshare.core.dao.impl;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
@@ -35,7 +36,6 @@ import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.gridfs.GridFsOperations;
 import org.springframework.data.mongodb.gridfs.GridFsResource;
 
-import com.google.common.collect.Iterators;
 import com.google.common.io.ByteSource;
 import com.mongodb.BasicDBObject;
 import com.mongodb.DBObject;
@@ -50,6 +50,8 @@ public class MongoFileDataStoreImpl implements FileDataStore, AtomicBlobReplace 
 
 	private static final Logger logger = LoggerFactory.getLogger(MongoFileDataStoreImpl.class);
 
+	private static final String GENERATION_KEY = "generation";
+
 	private GridFsOperations gridOperations;
 
 	private SimpleMongoClientDatabaseFactory mongoDbFactory;
@@ -61,16 +63,10 @@ public class MongoFileDataStoreImpl implements FileDataStore, AtomicBlobReplace 
 		this.mongoDbFactory = mongoDbFactory;
 	}
 
+	/** Removes every copy stored under this uuid, including any stray duplicate. */
 	@Override
 	public void remove(FileMetaData metadata) {
-		Query query = new Query().addCriteria(Criteria.where("metadata.uuid").is(metadata.getUuid()));
-		GridFSFindIterable find = gridOperations.find(query);
-		if (find == null) {
-			logger.warn("Can not remove document '{}' in gridfs", metadata.getUuid());
-		} else {
-			checkNotTooMany(metadata, find);
-			gridOperations.delete(query);
-		}
+		gridOperations.delete(uuidQuery(metadata.getUuid()));
 	}
 
 	@Override
@@ -93,31 +89,88 @@ public class MongoFileDataStoreImpl implements FileDataStore, AtomicBlobReplace 
 
 	@Override
 	public ByteSource get(FileMetaData metadata) {
-		Query query = new Query().addCriteria(Criteria.where("metadata.uuid").is(metadata.getUuid()));
-		GridFSFindIterable find = gridOperations.find(query);
-		if (find == null) {
+		if (resolveNewest(metadata.getUuid()) == null) {
 			logger.error("Can not find document '{}' in gridfs", metadata.getUuid());
 			throw new TechnicalException(TechnicalErrorCode.GENERIC,
 					"Can not find document in gridfs : " + metadata.getUuid());
 		}
-		checkNotTooMany(metadata, find);
 		return new ByteSource() {
 			@Override
 			public InputStream openStream() throws IOException {
-				GridFSDownloadStream gridFSDownloadStream = getGridFs().openDownloadStream(find.first().getObjectId());
-				GridFsResource gridFsResource = new GridFsResource(find.first(), gridFSDownloadStream);
+				// Resolved again at open time, not captured above: the blob may
+				// have been atomically replaced in between.
+				GridFSFile file = resolveNewest(metadata.getUuid());
+				if (file == null) {
+					throw new IOException("no such blob in gridfs: " + metadata.getUuid());
+				}
+				GridFSDownloadStream gridFSDownloadStream = getGridFs().openDownloadStream(file.getObjectId());
+				GridFsResource gridFsResource = new GridFsResource(file, gridFSDownloadStream);
 				return gridFsResource.getInputStream();
 			}
 		};
 	}
 
-	private void checkNotTooMany(FileMetaData metadata, GridFSFindIterable find) {
-		int size = Iterators.size(find.iterator());
-		if (size >= 2) {
-			logger.error("Too many results found : {} for document '{}'.", size, metadata.getUuid());
-			throw new TechnicalException(TechnicalErrorCode.GENERIC,
-					"Too many results found in gridfs : " + metadata.getUuid());
+	/**
+	 * Replacement order: higher {@code metadata.generation} first (set by
+	 * {@link #atomicReplace}, so it doesn't depend on the clocks of the
+	 * nodes involved), then newest upload, then newest {@code _id}. Files
+	 * written by {@link #add} carry no generation and count as 0.
+	 */
+	private static final Comparator<GridFSFile> NEWEST_FIRST = Comparator
+			.<GridFSFile>comparingLong(MongoFileDataStoreImpl::generationOf)
+			.thenComparing(GridFSFile::getUploadDate, Comparator.nullsFirst(Comparator.naturalOrder()))
+			.thenComparing(GridFSFile::getObjectId, Comparator.nullsFirst(Comparator.naturalOrder()))
+			.reversed();
+
+	private static long generationOf(GridFSFile file) {
+		org.bson.Document metadata = file.getMetadata();
+		Object generation = metadata == null ? null : metadata.get(GENERATION_KEY);
+		return generation instanceof Number ? ((Number) generation).longValue() : 0L;
+	}
+
+	/** Every copy stored under this uuid, newest first. */
+	private List<GridFSFile> findNewestFirst(String uuid) {
+		List<GridFSFile> files = new ArrayList<>();
+		GridFSFindIterable find = gridOperations.find(uuidQuery(uuid));
+		if (find != null) {
+			for (GridFSFile file : find) {
+				files.add(file);
+			}
 		}
+		files.sort(NEWEST_FIRST);
+		return files;
+	}
+
+	/**
+	 * The copy that currently represents this uuid, or null if there is none.
+	 *
+	 * <p>Normally there is exactly one. Two can exist if {@link #atomicReplace}
+	 * was interrupted after storing the replacement but before deleting what
+	 * it replaced; the replacement is the newest by construction, and it is
+	 * only ever stored from an already-verified source, so it is the right
+	 * one. The stale copies are deleted here (best-effort) rather than
+	 * making every later read of this uuid fail.
+	 */
+	private GridFSFile resolveNewest(String uuid) {
+		List<GridFSFile> files = findNewestFirst(uuid);
+		if (files.isEmpty()) {
+			return null;
+		}
+		if (files.size() > 1) {
+			List<ObjectId> staleIds = new ArrayList<>();
+			for (GridFSFile stale : files.subList(1, files.size())) {
+				staleIds.add(stale.getObjectId());
+			}
+			logger.warn("{} copies of document '{}' found in gridfs (interrupted replace?); keeping the newest "
+					+ "and deleting the {} older one(s).", files.size(), uuid, staleIds.size());
+			try {
+				gridOperations.delete(new Query().addCriteria(Criteria.where("_id").in(staleIds)));
+			} catch (RuntimeException e) {
+				logger.warn("Could not delete the stale copies of document '{}' in gridfs: {}", uuid,
+						e.getMessage());
+			}
+		}
+		return files.get(0);
 	}
 
 	@Override
@@ -145,33 +198,60 @@ public class MongoFileDataStoreImpl implements FileDataStore, AtomicBlobReplace 
 	 * the new document is inserted under target's uuid first, and only the
 	 * document(s) previously holding that uuid (captured beforehand, so the
 	 * one just inserted is never touched) are removed afterward — a reader
-	 * of target's uuid always finds at least one valid document, at worst
-	 * transiently two, but never zero.
+	 * of target's uuid always finds at least one valid document, never zero.
+	 *
+	 * <p>Not atomic against a crash between those steps, so it is made
+	 * safe to interrupt instead: the new document carries a higher
+	 * {@code generation} than anything it replaces, and
+	 * {@link #resolveNewest} resolves duplicates of a uuid to the newest and
+	 * deletes the rest. An interrupted replace therefore leaves, at worst, a
+	 * stale copy that is ignored and cleaned up on the next access, and a
+	 * re-run (the source is only deleted last) simply finds its work done.
 	 */
 	@Override
 	public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
-		Query sourceQuery = uuidQuery(source.getUuid());
-		GridFSFindIterable sourceFind = gridOperations.find(sourceQuery);
-		checkNotTooMany(source, sourceFind);
-		GridFSFile sourceFile = sourceFind.first();
+		GridFSFile sourceFile = resolveNewest(source.getUuid());
 		if (sourceFile == null) {
 			throw new IOException("no such source blob: " + source.getUuid());
 		}
 
+		List<GridFSFile> targetFiles = findNewestFirst(target.getUuid());
 		List<ObjectId> staleTargetIds = new ArrayList<>();
-		for (GridFSFile file : gridOperations.find(uuidQuery(target.getUuid()))) {
+		for (GridFSFile file : targetFiles) {
 			staleTargetIds.add(file.getObjectId());
 		}
+		long generation = targetFiles.isEmpty() ? 0L : generationOf(targetFiles.get(0)) + 1;
 
 		DBObject meta = new BasicDBObject();
 		meta.put("uuid", target.getUuid());
+		meta.put(GENERATION_KEY, generation);
 		try (GridFSDownloadStream in = getGridFs().openDownloadStream(sourceFile.getObjectId())) {
-			gridOperations.store(in, target.getFileName(), target.getMimeType(), meta);
+			gridOperations.store(in, fileNameFor(target, targetFiles, sourceFile), target.getMimeType(), meta);
 		}
 
 		if (!staleTargetIds.isEmpty()) {
 			gridOperations.delete(new Query().addCriteria(Criteria.where("_id").in(staleTargetIds)));
 		}
-		gridOperations.delete(sourceQuery);
+		gridOperations.delete(uuidQuery(source.getUuid()));
+	}
+
+	/**
+	 * Mongo does not support an empty file name (see {@link #add}), and the
+	 * batches build target metadata from the Document, which carries none.
+	 * Keep whatever name the blob being replaced already had.
+	 */
+	private String fileNameFor(FileMetaData target, List<GridFSFile> replaced, GridFSFile source) {
+		if (target.getFileName() != null && !target.getFileName().isEmpty()) {
+			return target.getFileName();
+		}
+		for (GridFSFile file : replaced) {
+			if (file.getFilename() != null && !file.getFilename().isEmpty()) {
+				return file.getFilename();
+			}
+		}
+		if (source.getFilename() != null && !source.getFilename().isEmpty()) {
+			return source.getFilename();
+		}
+		return UUID.randomUUID().toString();
 	}
 }
