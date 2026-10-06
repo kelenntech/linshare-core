@@ -25,6 +25,9 @@
 		<property name="vaultAddress" value="${linshare.documents.encryption.vault.address}" />
 		<property name="vaultTokenFile" value="${linshare.documents.encryption.vault.token-file}" />
 		<property name="vaultTransitKeyName" value="${linshare.documents.encryption.vault.transit-key-name}" />
+		<property name="previousKeyId" value="${linshare.documents.encryption.previous-key-id}" />
+		<property name="previousLocalMasterKeyFile" value="${linshare.documents.encryption.local.previous-master-key-file}" />
+		<property name="previousVaultTransitKeyName" value="${linshare.documents.encryption.vault.previous-transit-key-name}" />
 	</bean>
 
 	<bean
