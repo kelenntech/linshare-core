@@ -148,6 +148,55 @@ class KekRotatorTest {
 	}
 
 	@Test
+	void plaintextBlobIsReportedNotEncryptedInsteadOfThrowing() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		byte[] plaintext = randomBytes(50);
+		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream",
+				(long) plaintext.length, "f.bin");
+		metadata.setUuid("doc-1");
+		metadata.setBucketUuid(BUCKET);
+		store.putRaw(BUCKET, "doc-1", plaintext);
+		KekRotator rotator = new KekRotator(store, localKeyService("old-kek"), localKeyService("new-kek"));
+
+		assertEquals(RotationOutcome.NOT_ENCRYPTED, rotator.rotate(metadata, "new-kek"));
+		assertArrayEquals(plaintext, store.rawBytes(BUCKET, "doc-1"));
+		assertFalse(store.exists(tempOf(metadata)));
+	}
+
+	@Test
+	void blobShorterThanTheMagicIsReportedNotEncrypted() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream", 2L, "f.bin");
+		metadata.setUuid("doc-1");
+		metadata.setBucketUuid(BUCKET);
+		store.putRaw(BUCKET, "doc-1", new byte[] { 1, 2 });
+		KekRotator rotator = new KekRotator(store, localKeyService("old-kek"), localKeyService("new-kek"));
+
+		assertEquals(RotationOutcome.NOT_ENCRYPTED, rotator.rotate(metadata, "new-kek"));
+	}
+
+	@Test
+	void rotatesAThumbnailBlobWhoseSizeIsNotRecorded() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		KeyEncryptionService oldKeyService = localKeyService("old-kek");
+		byte[] plaintext = randomBytes(16 * 5 + 3);
+		FileMetaData documentLike = encryptedMetadata(store, oldKeyService, plaintext, "thmb-1");
+		// Thumbnail metadata as the batches build it: no size, thumbnail kind.
+		FileMetaData metadata = new FileMetaData(FileMetaDataKind.THUMBNAIL_SMALL, "image/png", null);
+		metadata.setUuid(documentLike.getUuid());
+		metadata.setBucketUuid(BUCKET);
+		KeyEncryptionService newKeyService = localKeyService("new-kek");
+		KekRotator rotator = new KekRotator(store, oldKeyService, newKeyService);
+
+		assertEquals(RotationOutcome.ROTATED, rotator.rotate(metadata, "new-kek"));
+
+		EncryptedBlobHeader header = EncryptedBlobFormat
+				.readHeader(new ByteArrayInputStream(store.rawBytes(BUCKET, "thmb-1")));
+		assertEquals("new-kek", header.getKeyId());
+		assertEquals(RotationOutcome.ALREADY_ROTATED, rotator.rotate(metadata, "new-kek"));
+	}
+
+	@Test
 	void alreadyRotatedBlobIsSkippedIdempotently() throws Exception {
 		InMemoryFileDataStore store = new InMemoryFileDataStore();
 		KeyEncryptionService oldKeyService = localKeyService("old-kek");

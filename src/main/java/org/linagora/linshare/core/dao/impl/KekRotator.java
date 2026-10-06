@@ -88,6 +88,12 @@ public class KekRotator {
 		if (!delegate.exists(metadata)) {
 			return RotationOutcome.MISSING;
 		}
+		if (isPlaintext(metadata)) {
+			// readHeader() would throw a runtime EncryptedBlobFormatException here,
+			// which aborts the whole batch run; one not-yet-migrated blob must
+			// not stop every other blob from being rotated.
+			return RotationOutcome.NOT_ENCRYPTED;
+		}
 		EncryptedBlobHeader header = readHeader(metadata);
 		FileMetaData tempMetadata = tempMetadataFor(metadata);
 
@@ -128,6 +134,15 @@ public class KekRotator {
 			return RotationOutcome.ROTATED;
 		} finally {
 			Arrays.fill(dek, (byte) 0);
+		}
+	}
+
+	/** Peeks the magic bytes only, same check as {@link EncryptedBlobMigrator#isLegacyBlob}. */
+	private boolean isPlaintext(FileMetaData metadata) throws IOException {
+		byte[] magic = EncryptedBlobHeader.magic();
+		try (InputStream in = delegate.getRange(metadata, 0, magic.length).openStream()) {
+			byte[] peeked = in.readNBytes(magic.length);
+			return !Arrays.equals(peeked, magic);
 		}
 	}
 

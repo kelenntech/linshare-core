@@ -23,6 +23,12 @@ public enum RotationOutcome {
 
 	MISSING,
 
+	/**
+	 * The blob is still legacy plaintext (not yet migrated), so there is no
+	 * wrapped key to rotate. Left untouched; the migration batch owns it.
+	 */
+	NOT_ENCRYPTED,
+
 	/** The new wrapped key/key id doesn't fit within this blob's reserved header capacity. */
 	WRAPPED_KEY_TOO_LARGE,
 

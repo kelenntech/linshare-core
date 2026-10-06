@@ -112,6 +112,15 @@ public class EncryptedFileDataStoreImpl implements FileDataStore {
 		return migrator.migrate(metadata, expectedSha256Hex);
 	}
 
+	/**
+	 * For blobs with no recorded plaintext size/SHA-256 (thumbnails).
+	 *
+	 * @see EncryptedBlobMigrator#migrate(FileMetaData)
+	 */
+	public MigrationOutcome migrateLegacyBlob(FileMetaData metadata) throws IOException {
+		return migrator.migrate(metadata);
+	}
+
 	/** Whether a previous key is configured, making {@link #rotateKek} usable. */
 	public boolean isRotationConfigured() {
 		return kekRotator != null;

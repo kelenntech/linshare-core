@@ -213,6 +213,99 @@ class EncryptedBlobMigratorTest {
 		assertTrue(store.atomicReplaceWasCalled, "commit must prefer AtomicBlobReplace when available");
 	}
 
+	/** A thumbnail's metadata: its size isn't recorded anywhere, and it has no stored SHA-256. */
+	private FileMetaData legacyThumbnailMetadata(InMemoryFileDataStore store, byte[] legacyPlaintext, String uuid) {
+		FileMetaData metadata = new FileMetaData(FileMetaDataKind.THUMBNAIL_SMALL, "image/png", null);
+		metadata.setUuid(uuid);
+		metadata.setBucketUuid(BUCKET);
+		store.putRaw(BUCKET, uuid, legacyPlaintext);
+		return metadata;
+	}
+
+	@Test
+	void migratesABlobWithNoRecordedSizeOrSha256ByMeasuringIt() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		byte[] legacyPlaintext = randomBytes(16 * 5 + 3);
+		FileMetaData metadata = legacyThumbnailMetadata(store, legacyPlaintext, "thmb-1");
+		KeyEncryptionService keyService = newKeyService();
+		EncryptionParameters params = smallChunkParams();
+		EncryptedBlobMigrator migrator = new EncryptedBlobMigrator(store, keyService, params);
+
+		MigrationOutcome outcome = migrator.migrate(metadata);
+
+		assertEquals(MigrationOutcome.MIGRATED, outcome);
+		assertFalse(store.exists(tempOf(metadata)), "temp key must be cleaned up after commit");
+		assertFalse(migrator.isLegacyBlob(metadata));
+		EncryptedFileDataStoreImpl decoratedStore = new EncryptedFileDataStoreImpl(store, keyService, params, true,
+				true, true, null, null);
+		try (InputStream in = decoratedStore.get(metadata).openStream()) {
+			assertArrayEquals(legacyPlaintext, ByteStreams.toByteArray(in));
+		}
+	}
+
+	@Test
+	void measuredMigrationIsIdempotent() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		FileMetaData metadata = legacyThumbnailMetadata(store, randomBytes(50), "thmb-1");
+		EncryptedBlobMigrator migrator = new EncryptedBlobMigrator(store, newKeyService(), smallChunkParams());
+		migrator.migrate(metadata);
+		byte[] afterFirstMigration = store.rawBytes(BUCKET, "thmb-1");
+
+		MigrationOutcome secondRun = migrator.migrate(metadata);
+
+		assertEquals(MigrationOutcome.ALREADY_ENCRYPTED, secondRun);
+		assertArrayEquals(afterFirstMigration, store.rawBytes(BUCKET, "thmb-1"));
+	}
+
+	@Test
+	void measuredMigrationOfAMissingBlobReturnsMissing() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		EncryptedBlobMigrator migrator = new EncryptedBlobMigrator(store, newKeyService(), smallChunkParams());
+		FileMetaData metadata = new FileMetaData(FileMetaDataKind.THUMBNAIL_SMALL, "image/png", null);
+		metadata.setUuid("does-not-exist");
+		metadata.setBucketUuid(BUCKET);
+
+		assertEquals(MigrationOutcome.MISSING, migrator.migrate(metadata));
+	}
+
+	@Test
+	void measuredMigrationResumesFromAValidTempWithoutReEncrypting() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		byte[] legacyPlaintext = randomBytes(16 * 5 + 3);
+		FileMetaData metadata = legacyThumbnailMetadata(store, legacyPlaintext, "thmb-1");
+		KeyEncryptionService keyService = newKeyService();
+		EncryptionParameters params = smallChunkParams();
+		byte[] preplacedTempCiphertext = encryptForMigration(keyService, params, legacyPlaintext, "thmb-1");
+		store.putRaw(BUCKET, "thmb-1.migrating", preplacedTempCiphertext);
+
+		MigrationOutcome outcome = new EncryptedBlobMigrator(store, keyService, params).migrate(metadata);
+
+		assertEquals(MigrationOutcome.MIGRATED, outcome);
+		assertArrayEquals(preplacedTempCiphertext, store.rawBytes(BUCKET, "thmb-1"));
+	}
+
+	@Test
+	void measuredMigrationDiscardsATempThatDoesNotMatchTheLegacyBlob() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		byte[] legacyPlaintext = randomBytes(16 * 5 + 3);
+		FileMetaData metadata = legacyThumbnailMetadata(store, legacyPlaintext, "thmb-1");
+		KeyEncryptionService keyService = newKeyService();
+		EncryptionParameters params = smallChunkParams();
+		// A fully valid temp, but of different content (e.g. left by a run
+		// started before the legacy blob was regenerated).
+		byte[] otherPlaintext = Arrays.copyOf(legacyPlaintext, legacyPlaintext.length);
+		otherPlaintext[0] ^= 0x01;
+		store.putRaw(BUCKET, "thmb-1.migrating", encryptForMigration(keyService, params, otherPlaintext, "thmb-1"));
+		EncryptedBlobMigrator migrator = new EncryptedBlobMigrator(store, keyService, params);
+
+		MigrationOutcome firstAttempt = migrator.migrate(metadata);
+
+		assertEquals(MigrationOutcome.VERIFICATION_FAILED, firstAttempt);
+		assertFalse(store.exists(tempOf(metadata)));
+		assertArrayEquals(legacyPlaintext, store.rawBytes(BUCKET, "thmb-1"));
+		assertEquals(MigrationOutcome.MIGRATED, migrator.migrate(metadata));
+	}
+
 	private FileMetaData tempOf(FileMetaData metadata) {
 		FileMetaData temp = new FileMetaData(metadata.getKind(), metadata.getMimeType(), metadata.getSize(),
 				metadata.getFileName());

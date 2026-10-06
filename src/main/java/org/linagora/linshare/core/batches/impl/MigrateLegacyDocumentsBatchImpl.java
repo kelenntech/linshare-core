@@ -41,6 +41,10 @@ import org.linagora.linshare.core.repository.DocumentRepository;
  * i.e. unless encryption reads are enabled — so installations that never
  * turn encryption on never pay for a scan.
  *
+ * <p>A document's thumbnails are migrated along with its main blob, so
+ * thumbnails of documents uploaded before encryption was enabled don't stay
+ * plaintext at rest.
+ *
  * <p>Every document is re-examined on every run rather than tracked via a
  * persisted flag: {@link EncryptedFileDataStoreImpl#isLegacyBlob} is a cheap
  * few-byte peek, so already-migrated documents are inexpensive no-ops, and
@@ -90,20 +94,45 @@ public class MigrateLegacyDocumentsBatchImpl extends GenericBatchImpl {
 		}
 
 		EncryptedFileDataStoreImpl encryptedStore = (EncryptedFileDataStoreImpl) fileDataStore;
-		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, document);
+		boolean migrated = false;
+		IOException failure = null;
+
+		// The document's own blob (integrity-checked against its stored
+		// SHA-256) plus its thumbnails: thumbnails of documents uploaded
+		// before encryption was enabled would otherwise stay plaintext at rest.
+		FileMetaData dataMetadata = new FileMetaData(FileMetaDataKind.DATA, document);
 		try {
-			MigrationOutcome outcome = encryptedStore.migrateLegacyBlob(metadata, document.getSha256sum());
-			logOutcome(batchRunContext, total, position, identifier, outcome);
-			context.setProcessed(outcome == MigrationOutcome.MIGRATED);
+			MigrationOutcome outcome = encryptedStore.migrateLegacyBlob(dataMetadata, document.getSha256sum());
+			logOutcome(batchRunContext, total, position, identifier, dataMetadata.getKind(), outcome);
+			migrated |= outcome == MigrationOutcome.MIGRATED;
 		} catch (IOException e) {
-			throw new BatchBusinessException(context,
-					"Failed to migrate document " + identifier + " to encrypted storage: " + e.getMessage());
+			logger.error("Failed to migrate {} blob of document {}", dataMetadata.getKind(), identifier, e);
+			failure = new IOException(dataMetadata.getKind() + ": " + e.getMessage(), e);
 		}
+		for (FileMetaData thumbnail : FileMetaData.thumbnailsOf(document)) {
+			// One blob failing must not leave the document's other blobs
+			// plaintext; the failure is reported once all were tried.
+			try {
+				MigrationOutcome outcome = encryptedStore.migrateLegacyBlob(thumbnail);
+				logOutcome(batchRunContext, total, position, identifier, thumbnail.getKind(), outcome);
+				migrated |= outcome == MigrationOutcome.MIGRATED;
+			} catch (IOException e) {
+				logger.error("Failed to migrate {} blob of document {}", thumbnail.getKind(), identifier, e);
+				if (failure == null) {
+					failure = new IOException(thumbnail.getKind() + ": " + e.getMessage(), e);
+				}
+			}
+		}
+		if (failure != null) {
+			throw new BatchBusinessException(context,
+					"Failed to migrate document " + identifier + " to encrypted storage: " + failure.getMessage());
+		}
+		context.setProcessed(migrated);
 		return context;
 	}
 
 	/**
-	 * {@code MISSING}/{@code VERIFICATION_FAILED} mean this document isn't
+	 * {@code MISSING}/{@code VERIFICATION_FAILED} mean this blob isn't
 	 * converging to encrypted storage on its own and needs attention, unlike
 	 * {@code ALREADY_ENCRYPTED} (the everyday steady state) — surfaced at
 	 * WARN rather than DEBUG so they're actually visible at default
@@ -112,19 +141,19 @@ public class MigrateLegacyDocumentsBatchImpl extends GenericBatchImpl {
 	 * never fire for these).
 	 */
 	private void logOutcome(BatchRunContext batchRunContext, long total, long position, String identifier,
-			MigrationOutcome outcome) {
+			FileMetaDataKind kind, MigrationOutcome outcome) {
 		switch (outcome) {
 		case MISSING:
 			console.logWarn(batchRunContext, total, position,
-					"Document {} blob could not be found in storage; migration skipped.", identifier);
+					"Document {} " + kind + " blob could not be found in storage; migration skipped.", identifier);
 			return;
 		case VERIFICATION_FAILED:
 			console.logWarn(batchRunContext, total, position,
-					"Document {} failed post-migration verification; blob was left untouched (still "
+					"Document {} " + kind + " blob failed post-migration verification; it was left untouched (still "
 							+ "plaintext) and will be retried on the next run.", identifier);
 			return;
 		default:
-			console.logDebug(batchRunContext, total, position, "Document {} migration outcome: {}", identifier,
+			console.logDebug(batchRunContext, total, position, "Document {} " + kind + " migration outcome: {}", identifier,
 					outcome);
 		}
 	}

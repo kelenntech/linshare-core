@@ -15,11 +15,18 @@
  */
 package org.linagora.linshare.core.domain.objects;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
 import org.linagora.linshare.core.domain.constants.FileMetaDataKind;
 import org.linagora.linshare.core.domain.constants.ThumbnailType;
 import org.linagora.linshare.core.domain.entities.Document;
 import org.linagora.linshare.core.domain.entities.MailAttachment;
 import org.linagora.linshare.core.domain.entities.Signature;
+import org.linagora.linshare.core.domain.entities.Thumbnail;
 
 /**
  * @author fred
@@ -96,6 +103,44 @@ public class FileMetaData {
 		this.mimeType = mimeType;
 		this.size = null;
 		this.bucketUuid = document.getBucketUuid();
+	}
+
+	/**
+	 * The stored thumbnail blobs of a document (SMALL/MEDIUM/LARGE/PDF, plus
+	 * the deprecated single {@code thmbUuid} one), skipping those the
+	 * document doesn't actually have. Unlike {@link #FileMetaData(FileMetaDataKind, Document)}
+	 * it never throws for a thumbnail type that is absent (e.g. PDF
+	 * generation disabled) and never relies on {@code hasThumbnail} being
+	 * non-null. {@code size} is deliberately null: the document's own size is
+	 * the DATA blob's, not the thumbnail's, and a thumbnail's isn't recorded.
+	 */
+	@SuppressWarnings("deprecation")
+	public static List<FileMetaData> thumbnailsOf(Document document) {
+		List<FileMetaData> thumbnails = new ArrayList<>();
+		Set<String> seen = new HashSet<>();
+		if (document.getThumbnails() != null) {
+			for (Map.Entry<ThumbnailType, Thumbnail> entry : document.getThumbnails().entrySet()) {
+				Thumbnail thumbnail = entry.getValue();
+				if (entry.getKey() == null || thumbnail == null || thumbnail.getThumbnailUuid() == null
+						|| !seen.add(thumbnail.getThumbnailUuid())) {
+					continue;
+				}
+				thumbnails.add(forThumbnail(ThumbnailType.toFileMetaDataKind(entry.getKey()),
+						thumbnail.getThumbnailUuid(), document.getBucketUuid()));
+			}
+		}
+		String legacyUuid = document.getThmbUuid();
+		if (legacyUuid != null && seen.add(legacyUuid)) {
+			thumbnails.add(forThumbnail(FileMetaDataKind.THUMBNAIL, legacyUuid, document.getBucketUuid()));
+		}
+		return thumbnails;
+	}
+
+	private static FileMetaData forThumbnail(FileMetaDataKind kind, String uuid, String bucketUuid) {
+		FileMetaData metadata = new FileMetaData(kind, "image/png", null);
+		metadata.setUuid(uuid);
+		metadata.setBucketUuid(bucketUuid);
+		return metadata;
 	}
 
 	public FileMetaData(Signature signature) {

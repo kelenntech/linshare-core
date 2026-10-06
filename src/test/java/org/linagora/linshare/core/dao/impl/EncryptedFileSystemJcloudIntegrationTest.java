@@ -277,6 +277,40 @@ class EncryptedFileSystemJcloudIntegrationTest {
 		assertArrayEquals(plaintextA, readNotYetRotated);
 	}
 
+	@Test
+	void rotatedThumbnailStaysReadableOnceThePreviousKeyIsRetired(@TempDir Path tempDir) throws Exception {
+		FileSystemJcloudFileDataStoreImpl rawStore = (FileSystemJcloudFileDataStoreImpl) newRawFilesystemStore(
+				tempDir);
+		KeyEncryptionService oldKeyService = new LocalKeyEncryptionService(randomMasterKey(), "old-kek");
+		KeyEncryptionService newKeyService = new LocalKeyEncryptionService(randomMasterKey(), "new-kek");
+		EncryptionParameters params = new EncryptionParameters(64 * 1024, EncryptedBlobHeader.DEFAULT_KEY_ID_CAPACITY,
+				EncryptedBlobHeader.DEFAULT_WRAPPED_KEY_CAPACITY);
+		KeyEncryptionService rotatableKeyService = new org.linagora.linshare.storage.encryption.key.RotatableKeyEncryptionService(
+				"new-kek", newKeyService, "old-kek", oldKeyService);
+		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(rawStore, rotatableKeyService, params, true,
+				true, true, "new-kek", new KekRotator(rawStore, oldKeyService, newKeyService));
+
+		// A thumbnail encrypted under the previous key, as upload wrote it.
+		EncryptedFileDataStoreImpl oldOnlyStore = new EncryptedFileDataStoreImpl(rawStore, oldKeyService, params,
+				true, true, true, "old-kek", null);
+		byte[] thumbnail = randomBytes(700);
+		FileMetaData stored = oldOnlyStore.add(ByteSource.wrap(thumbnail),
+				new FileMetaData(FileMetaDataKind.THUMBNAIL_SMALL, "image/png", (long) thumbnail.length, null));
+		// Thumbnails are rotated from metadata built without a size.
+		FileMetaData asTheBatchBuildsIt = new FileMetaData(FileMetaDataKind.THUMBNAIL_SMALL, "image/png", null);
+		asTheBatchBuildsIt.setUuid(stored.getUuid());
+		asTheBatchBuildsIt.setBucketUuid(stored.getBucketUuid());
+
+		assertEquals(RotationOutcome.ROTATED, store.rotateKek(asTheBatchBuildsIt));
+
+		// The previous key is retired: only the new key remains configured.
+		EncryptedFileDataStoreImpl newOnlyStore = new EncryptedFileDataStoreImpl(rawStore, newKeyService, params,
+				true, true, true, "new-kek", null);
+		try (InputStream in = newOnlyStore.get(stored).openStream()) {
+			assertArrayEquals(thumbnail, ByteStreams.toByteArray(in));
+		}
+	}
+
 	private static String sha256Hex(byte[] data) throws Exception {
 		byte[] digest = MessageDigest.getInstance("SHA-256").digest(data);
 		StringBuilder sb = new StringBuilder();

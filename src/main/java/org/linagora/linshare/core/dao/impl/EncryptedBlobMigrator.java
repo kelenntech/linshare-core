@@ -89,6 +89,24 @@ public class EncryptedBlobMigrator {
 	}
 
 	public MigrationOutcome migrate(FileMetaData metadata, String expectedSha256Hex) throws IOException {
+		return migrate(metadata, metadata.getSize(), expectedSha256Hex, false);
+	}
+
+	/**
+	 * For blobs whose plaintext size and SHA-256 aren't recorded anywhere
+	 * (thumbnails: {@code Thumbnail} stores neither). The legacy blob is
+	 * streamed once up front to measure both, then the usual sequence runs
+	 * against those measured values — so the verification step can't catch a
+	 * legacy blob that was already damaged before migration, only a bad
+	 * encrypt/copy, which is all that can be checked without a stored digest.
+	 * Fine for thumbnails: small, regenerable, and not integrity-tracked.
+	 */
+	public MigrationOutcome migrate(FileMetaData metadata) throws IOException {
+		return migrate(metadata, null, null, true);
+	}
+
+	private MigrationOutcome migrate(FileMetaData metadata, Long knownPlaintextSize, String expectedSha256Hex,
+			boolean measureLegacy) throws IOException {
 		if (!delegate.exists(metadata)) {
 			return MigrationOutcome.MISSING;
 		}
@@ -105,11 +123,23 @@ public class EncryptedBlobMigrator {
 
 		byte[] aadBlobId = metadata.getUuid().getBytes(StandardCharsets.UTF_8);
 
-		if (!delegate.exists(tempMetadata)) {
-			encryptToTemp(metadata, tempMetadata, aadBlobId);
+		long plaintextSize;
+		String expectedHash = expectedSha256Hex;
+		if (measureLegacy) {
+			// Also needed when resuming from a leftover temp: its verification
+			// still has to be checked against what the legacy blob really is.
+			MeasuredBlob measured = measure(metadata);
+			plaintextSize = measured.size;
+			expectedHash = measured.sha256Hex;
+		} else {
+			plaintextSize = knownPlaintextSize;
 		}
 
-		if (!verifyTemp(tempMetadata, aadBlobId, expectedSha256Hex)) {
+		if (!delegate.exists(tempMetadata)) {
+			encryptToTemp(metadata, tempMetadata, aadBlobId, plaintextSize);
+		}
+
+		if (!verifyTemp(tempMetadata, aadBlobId, expectedHash)) {
 			delegate.remove(tempMetadata);
 			return MigrationOutcome.VERIFICATION_FAILED;
 		}
@@ -126,9 +156,28 @@ public class EncryptedBlobMigrator {
 		return temp;
 	}
 
-	private void encryptToTemp(FileMetaData metadata, FileMetaData tempMetadata, byte[] aadBlobId)
-			throws IOException {
-		long plaintextSize = metadata.getSize();
+	private MeasuredBlob measure(FileMetaData metadata) throws IOException {
+		MessageDigest digest = sha256();
+		try (InputStream in = new DigestInputStream(delegate.get(metadata).openStream(), digest)) {
+			long size = ByteStreams.exhaust(in);
+			return new MeasuredBlob(size, toHex(digest.digest()));
+		}
+	}
+
+	private static final class MeasuredBlob {
+
+		private final long size;
+
+		private final String sha256Hex;
+
+		private MeasuredBlob(long size, String sha256Hex) {
+			this.size = size;
+			this.sha256Hex = sha256Hex;
+		}
+	}
+
+	private void encryptToTemp(FileMetaData metadata, FileMetaData tempMetadata, byte[] aadBlobId,
+			long plaintextSize) throws IOException {
 		ByteSource legacyPlaintext = delegate.get(metadata);
 		ChunkedEncryptor encryptor = new ChunkedEncryptor(keyEncryptionService, encryptionParameters);
 		EncryptingBlobContext ctx = encryptor.prepare(plaintextSize);

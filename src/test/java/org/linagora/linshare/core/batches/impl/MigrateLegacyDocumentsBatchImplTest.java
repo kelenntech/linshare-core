@@ -26,13 +26,19 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.util.EnumMap;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.linagora.linshare.core.batches.utils.BatchConsole;
 import org.linagora.linshare.core.dao.impl.EncryptedFileDataStoreImpl;
 import org.linagora.linshare.core.dao.impl.MigrationOutcome;
+import org.linagora.linshare.core.domain.constants.FileMetaDataKind;
+import org.linagora.linshare.core.domain.constants.ThumbnailType;
 import org.linagora.linshare.core.domain.entities.Account;
 import org.linagora.linshare.core.domain.entities.Document;
+import org.linagora.linshare.core.domain.entities.Thumbnail;
 import org.linagora.linshare.core.domain.objects.FileMetaData;
 import org.linagora.linshare.core.exception.BatchBusinessException;
 import org.linagora.linshare.core.job.quartz.BatchRunContext;
@@ -165,5 +171,136 @@ class MigrateLegacyDocumentsBatchImplTest {
 		batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
 
 		verify(console, never()).logWarn(any(BatchRunContext.class), anyLong(), anyLong(), any(), any());
+	}
+
+	private Document documentWithThumbnails(String uuid, ThumbnailType... types) {
+		Document document = documentWithBucket(uuid);
+		document.setHasThumbnail(true);
+		Map<ThumbnailType, Thumbnail> thumbnails = new EnumMap<>(ThumbnailType.class);
+		for (ThumbnailType type : types) {
+			thumbnails.put(type, new Thumbnail(uuid + "-thmb-" + type.name().toLowerCase(), type, document));
+		}
+		document.setThumbnails(thumbnails);
+		return document;
+	}
+
+	@Test
+	void executeMigratesTheDocumentsThumbnailsWithoutAKnownSha256() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any())).thenReturn(MigrationOutcome.MIGRATED);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class))).thenReturn(MigrationOutcome.MIGRATED);
+		Document document = documentWithThumbnails("doc-1", ThumbnailType.SMALL, ThumbnailType.MEDIUM,
+				ThumbnailType.LARGE);
+		document.setThmbUuid("doc-1-legacy-thmb");
+		document.setSha256sum("abc123");
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
+
+		var context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+
+		// The DATA blob keeps its integrity check against the stored SHA-256.
+		ArgumentCaptor<FileMetaData> data = ArgumentCaptor.forClass(FileMetaData.class);
+		verify(fileDataStore).migrateLegacyBlob(data.capture(), eq("abc123"));
+		assertEquals(FileMetaDataKind.DATA, data.getValue().getKind());
+		assertEquals("doc-1", data.getValue().getUuid());
+		// Thumbnails have none recorded, so they go through the size/hash-less variant.
+		ArgumentCaptor<FileMetaData> thumbnails = ArgumentCaptor.forClass(FileMetaData.class);
+		verify(fileDataStore, org.mockito.Mockito.times(4)).migrateLegacyBlob(thumbnails.capture());
+		Map<FileMetaDataKind, String> uuidByKind = new EnumMap<>(FileMetaDataKind.class);
+		for (FileMetaData metadata : thumbnails.getAllValues()) {
+			uuidByKind.put(metadata.getKind(), metadata.getUuid());
+			assertEquals("bucket-1", metadata.getBucketUuid());
+		}
+		assertEquals("doc-1-thmb-small", uuidByKind.get(FileMetaDataKind.THUMBNAIL_SMALL));
+		assertEquals("doc-1-thmb-medium", uuidByKind.get(FileMetaDataKind.THUMBNAIL_MEDIUM));
+		assertEquals("doc-1-thmb-large", uuidByKind.get(FileMetaDataKind.THUMBNAIL_LARGE));
+		assertEquals("doc-1-legacy-thmb", uuidByKind.get(FileMetaDataKind.THUMBNAIL));
+		assertEquals(true, context.getProcessed());
+	}
+
+	@Test
+	void executeToleratesAThumbnailTypeTheDocumentDoesNotHave() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any()))
+				.thenReturn(MigrationOutcome.ALREADY_ENCRYPTED);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class)))
+				.thenReturn(MigrationOutcome.ALREADY_ENCRYPTED);
+		Document document = documentWithThumbnails("doc-1", ThumbnailType.SMALL);
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
+
+		var context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+
+		verify(fileDataStore, org.mockito.Mockito.times(1)).migrateLegacyBlob(any(FileMetaData.class));
+		assertEquals(false, context.getProcessed());
+	}
+
+	@Test
+	void executeIsProcessedWhenOnlyAThumbnailNeededMigrating() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any()))
+				.thenReturn(MigrationOutcome.ALREADY_ENCRYPTED);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class))).thenReturn(MigrationOutcome.MIGRATED);
+		Document document = documentWithThumbnails("doc-1", ThumbnailType.SMALL);
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
+
+		var context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+
+		assertEquals(true, context.getProcessed());
+	}
+
+	@Test
+	void executeLogsWarnWhenAThumbnailFailsVerification() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any()))
+				.thenReturn(MigrationOutcome.ALREADY_ENCRYPTED);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class)))
+				.thenReturn(MigrationOutcome.VERIFICATION_FAILED);
+		Document document = documentWithThumbnails("doc-1", ThumbnailType.SMALL);
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
+		BatchConsole console = mock(BatchConsole.class);
+		batch.setConsole(console);
+
+		batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+
+		verify(console).logWarn(any(BatchRunContext.class), eq(1L), eq(0L), any(), eq("doc-1"));
+	}
+
+	@Test
+	void aFailingThumbnailDoesNotStopTheOtherBlobsBeingMigratedButIsReported() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any())).thenReturn(MigrationOutcome.MIGRATED);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class))).thenAnswer(invocation -> {
+			FileMetaData metadata = invocation.getArgument(0);
+			if (metadata.getKind() == FileMetaDataKind.THUMBNAIL_SMALL) {
+				throw new IOException("boom");
+			}
+			return MigrationOutcome.MIGRATED;
+		});
+		Document document = documentWithThumbnails("doc-1", ThumbnailType.SMALL, ThumbnailType.LARGE);
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
+
+		assertThrows(BatchBusinessException.class,
+				() -> batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0));
+
+		verify(fileDataStore, org.mockito.Mockito.times(2)).migrateLegacyBlob(any(FileMetaData.class));
+	}
+
+	@Test
+	void aFailingMainBlobDoesNotStopTheThumbnailsBeingMigrated() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class), any())).thenThrow(new IOException("boom"));
+		when(fileDataStore.migrateLegacyBlob(any(FileMetaData.class))).thenReturn(MigrationOutcome.MIGRATED);
+		Document document = documentWithThumbnails("doc-1", ThumbnailType.SMALL);
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		MigrateLegacyDocumentsBatchImpl batch = newBatch(fileDataStore);
+
+		assertThrows(BatchBusinessException.class,
+				() -> batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0));
+
+		verify(fileDataStore).migrateLegacyBlob(any(FileMetaData.class));
 	}
 }

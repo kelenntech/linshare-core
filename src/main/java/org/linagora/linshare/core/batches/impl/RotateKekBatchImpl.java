@@ -16,6 +16,7 @@
 package org.linagora.linshare.core.batches.impl;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -41,6 +42,10 @@ import org.linagora.linshare.core.repository.DocumentRepository;
  * AND a previous key is configured — i.e. unless
  * {@code linshare.documents.encryption.previous-key-id} is set — so
  * installations that never configure rotation never pay for a scan.
+ *
+ * <p>A document's thumbnails are rotated along with its main blob — they
+ * are encrypted on upload too, so they would otherwise stay on the previous
+ * key and become undecryptable once it is retired.
  *
  * <p>Every document is re-examined on every run rather than tracked via a
  * persisted flag: {@link EncryptedFileDataStoreImpl#rotateKek} is cheap to
@@ -92,21 +97,40 @@ public class RotateKekBatchImpl extends GenericBatchImpl {
 		}
 
 		EncryptedFileDataStoreImpl encryptedStore = (EncryptedFileDataStoreImpl) fileDataStore;
-		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, document);
-		try {
-			RotationOutcome outcome = encryptedStore.rotateKek(metadata);
-			logOutcome(batchRunContext, total, position, identifier, outcome);
-			context.setProcessed(outcome == RotationOutcome.ROTATED);
-		} catch (IOException e) {
-			throw new BatchBusinessException(context,
-					"Failed to rotate key for document " + identifier + ": " + e.getMessage());
+		// The document's own blob plus its thumbnails: thumbnails are encrypted
+		// on upload too, so they carry the previous key in their headers as
+		// well and would become undecryptable once that key is retired.
+		List<FileMetaData> blobs = new ArrayList<>();
+		blobs.add(new FileMetaData(FileMetaDataKind.DATA, document));
+		blobs.addAll(FileMetaData.thumbnailsOf(document));
+
+		boolean rotated = false;
+		IOException failure = null;
+		for (FileMetaData metadata : blobs) {
+			// One blob failing must not leave the document's other blobs on
+			// the previous key; the failure is reported once all were tried.
+			try {
+				RotationOutcome outcome = encryptedStore.rotateKek(metadata);
+				logOutcome(batchRunContext, total, position, identifier, metadata.getKind(), outcome);
+				rotated |= outcome == RotationOutcome.ROTATED;
+			} catch (IOException e) {
+				logger.error("Failed to rotate {} blob of document {}", metadata.getKind(), identifier, e);
+				if (failure == null) {
+					failure = new IOException(metadata.getKind() + ": " + e.getMessage(), e);
+				}
+			}
 		}
+		if (failure != null) {
+			throw new BatchBusinessException(context,
+					"Failed to rotate key for document " + identifier + ": " + failure.getMessage());
+		}
+		context.setProcessed(rotated);
 		return context;
 	}
 
 	/**
-	 * {@code MISSING}/{@code WRAPPED_KEY_TOO_LARGE}/{@code VERIFICATION_FAILED}
-	 * mean this document isn't converging to the current key on its own and
+	 * {@code MISSING}/{@code NOT_ENCRYPTED}/{@code WRAPPED_KEY_TOO_LARGE}/{@code VERIFICATION_FAILED}
+	 * mean this blob isn't converging to the current key on its own and
 	 * needs attention, unlike {@code ALREADY_ROTATED} (the everyday steady
 	 * state) — surfaced at WARN rather than DEBUG so they're actually
 	 * visible at default verbosity, matching how the bucketUuid-missing skip
@@ -114,24 +138,29 @@ public class RotateKekBatchImpl extends GenericBatchImpl {
 	 * notifyError() can never fire for these).
 	 */
 	private void logOutcome(BatchRunContext batchRunContext, long total, long position, String identifier,
-			RotationOutcome outcome) {
+			FileMetaDataKind kind, RotationOutcome outcome) {
 		switch (outcome) {
 		case MISSING:
 			console.logWarn(batchRunContext, total, position,
-					"Document {} blob could not be found in storage; rotation skipped.", identifier);
+					"Document {} " + kind + " blob could not be found in storage; rotation skipped.", identifier);
+			return;
+		case NOT_ENCRYPTED:
+			console.logWarn(batchRunContext, total, position,
+					"Document {} " + kind + " blob is still plaintext (not yet migrated); rotation skipped. Run the "
+							+ "legacy-document migration batch first.", identifier);
 			return;
 		case WRAPPED_KEY_TOO_LARGE:
 			console.logWarn(batchRunContext, total, position,
-					"Document {} could not be rotated: the new wrapped key does not fit within the blob's "
-							+ "reserved header capacity.", identifier);
+					"Document {} " + kind + " blob could not be rotated: the new wrapped key does not fit within the "
+							+ "blob's reserved header capacity.", identifier);
 			return;
 		case VERIFICATION_FAILED:
 			console.logWarn(batchRunContext, total, position,
-					"Document {} failed post-rotation verification; blob was left under the previous key "
-							+ "and will be retried on the next run.", identifier);
+					"Document {} " + kind + " blob failed post-rotation verification; it was left under the previous "
+							+ "key and will be retried on the next run.", identifier);
 			return;
 		default:
-			console.logDebug(batchRunContext, total, position, "Document {} rotation outcome: {}", identifier,
+			console.logDebug(batchRunContext, total, position, "Document {} " + kind + " rotation outcome: {}", identifier,
 					outcome);
 		}
 	}

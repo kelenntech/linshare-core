@@ -28,15 +28,21 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.linagora.linshare.core.batches.utils.BatchConsole;
 import org.linagora.linshare.core.dao.FileDataStore;
 import org.linagora.linshare.core.dao.impl.EncryptedFileDataStoreImpl;
 import org.linagora.linshare.core.dao.impl.RotationOutcome;
+import org.linagora.linshare.core.domain.constants.FileMetaDataKind;
+import org.linagora.linshare.core.domain.constants.ThumbnailType;
 import org.linagora.linshare.core.domain.entities.Account;
 import org.linagora.linshare.core.domain.entities.Document;
+import org.linagora.linshare.core.domain.entities.Thumbnail;
 import org.linagora.linshare.core.domain.objects.FileMetaData;
 import org.linagora.linshare.core.exception.BatchBusinessException;
 import org.linagora.linshare.core.job.quartz.BatchRunContext;
@@ -216,5 +222,132 @@ class RotateKekBatchImplTest {
 
 		assertThrows(BatchBusinessException.class,
 				() -> batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0));
+	}
+
+	private Document documentWithThumbnails(String uuid, ThumbnailType... types) {
+		Document document = documentWithBucket(uuid);
+		document.setHasThumbnail(true);
+		Map<ThumbnailType, Thumbnail> thumbnails = new EnumMap<>(ThumbnailType.class);
+		for (ThumbnailType type : types) {
+			thumbnails.put(type, new Thumbnail(uuid + "-thmb-" + type.name().toLowerCase(), type, document));
+		}
+		document.setThumbnails(thumbnails);
+		return document;
+	}
+
+	@Test
+	void executeRotatesTheDocumentsThumbnailsAsWellAsItsMainBlob() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.ROTATED);
+		Document document = documentWithThumbnails("doc-1", ThumbnailType.SMALL, ThumbnailType.MEDIUM,
+				ThumbnailType.LARGE, ThumbnailType.PDF);
+		document.setThmbUuid("doc-1-legacy-thmb");
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+
+		ResultContext context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+
+		ArgumentCaptor<FileMetaData> rotated = ArgumentCaptor.forClass(FileMetaData.class);
+		verify(fileDataStore, org.mockito.Mockito.times(6)).rotateKek(rotated.capture());
+		Map<FileMetaDataKind, String> uuidByKind = new EnumMap<>(FileMetaDataKind.class);
+		for (FileMetaData metadata : rotated.getAllValues()) {
+			uuidByKind.put(metadata.getKind(), metadata.getUuid());
+			assertEquals("bucket-1", metadata.getBucketUuid());
+		}
+		assertEquals("doc-1", uuidByKind.get(FileMetaDataKind.DATA));
+		assertEquals("doc-1-thmb-small", uuidByKind.get(FileMetaDataKind.THUMBNAIL_SMALL));
+		assertEquals("doc-1-thmb-medium", uuidByKind.get(FileMetaDataKind.THUMBNAIL_MEDIUM));
+		assertEquals("doc-1-thmb-large", uuidByKind.get(FileMetaDataKind.THUMBNAIL_LARGE));
+		assertEquals("doc-1-thmb-pdf", uuidByKind.get(FileMetaDataKind.THUMBNAIL_PDF));
+		assertEquals("doc-1-legacy-thmb", uuidByKind.get(FileMetaDataKind.THUMBNAIL));
+		assertEquals(true, context.getProcessed());
+	}
+
+	@Test
+	void executeToleratesAThumbnailTypeTheDocumentDoesNotHave() throws Exception {
+		// hasThumbnail is true but e.g. PDF generation is disabled: the main
+		// FileMetaData(kind, Document) constructor would NPE on the absent type.
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.ALREADY_ROTATED);
+		Document document = documentWithThumbnails("doc-1", ThumbnailType.SMALL);
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+
+		batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+
+		verify(fileDataStore, org.mockito.Mockito.times(2)).rotateKek(any(FileMetaData.class));
+	}
+
+	@Test
+	void executeIsProcessedWhenOnlyAThumbnailNeededRotating() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenAnswer(invocation -> {
+			FileMetaData metadata = invocation.getArgument(0);
+			return metadata.getKind() == FileMetaDataKind.DATA ? RotationOutcome.ALREADY_ROTATED
+					: RotationOutcome.ROTATED;
+		});
+		Document document = documentWithThumbnails("doc-1", ThumbnailType.SMALL);
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+
+		ResultContext context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+
+		assertEquals(true, context.getProcessed());
+	}
+
+	@Test
+	void executeLogsWarnForAMissingThumbnailBlobWithoutFailingTheDocument() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenAnswer(invocation -> {
+			FileMetaData metadata = invocation.getArgument(0);
+			return metadata.getKind() == FileMetaDataKind.DATA ? RotationOutcome.ROTATED : RotationOutcome.MISSING;
+		});
+		Document document = documentWithThumbnails("doc-1", ThumbnailType.SMALL);
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+		BatchConsole console = mock(BatchConsole.class);
+		batch.setConsole(console);
+
+		ResultContext context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+
+		verify(console).logWarn(any(BatchRunContext.class), eq(1L), eq(0L), any(), eq("doc-1"));
+		assertEquals(true, context.getProcessed());
+	}
+
+	@Test
+	void executeLogsWarnWhenABlobIsStillPlaintext() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.NOT_ENCRYPTED);
+		Document document = documentWithBucket("doc-1");
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+		BatchConsole console = mock(BatchConsole.class);
+		batch.setConsole(console);
+
+		ResultContext context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+
+		verify(console).logWarn(any(BatchRunContext.class), eq(1L), eq(0L), any(), eq("doc-1"));
+		assertEquals(false, context.getProcessed());
+	}
+
+	@Test
+	void aFailingThumbnailDoesNotStopTheOtherBlobsBeingRotatedButIsReported() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenAnswer(invocation -> {
+			FileMetaData metadata = invocation.getArgument(0);
+			if (metadata.getKind() == FileMetaDataKind.THUMBNAIL_SMALL) {
+				throw new IOException("boom");
+			}
+			return RotationOutcome.ROTATED;
+		});
+		Document document = documentWithThumbnails("doc-1", ThumbnailType.SMALL, ThumbnailType.LARGE);
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+
+		assertThrows(BatchBusinessException.class,
+				() -> batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0));
+
+		// DATA, SMALL (throws) and LARGE were all attempted.
+		verify(fileDataStore, org.mockito.Mockito.times(3)).rotateKek(any(FileMetaData.class));
 	}
 }
