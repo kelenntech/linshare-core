@@ -189,7 +189,7 @@ class EncryptedFileSystemJcloudIntegrationTest {
 				.headerTotalLength();
 
 		KeyEncryptionService newKeyService = new LocalKeyEncryptionService(randomMasterKey(), "new-kek");
-		KekRotator rotator = new KekRotator(rawStore, oldKeyService, newKeyService);
+		KekRotator rotator = new KekRotator(rawStore, "old-kek", oldKeyService, newKeyService);
 
 		RotationOutcome outcome = rotator.rotate(stored, "new-kek");
 		assertEquals(RotationOutcome.ROTATED, outcome);
@@ -230,7 +230,7 @@ class EncryptedFileSystemJcloudIntegrationTest {
 		// new one, and the store owns a KekRotator built from the same pair.
 		KeyEncryptionService rotatableKeyService = new org.linagora.linshare.storage.encryption.key.RotatableKeyEncryptionService(
 				"new-kek", newKeyService, "old-kek", oldKeyService);
-		KekRotator rotator = new KekRotator(rawStore, oldKeyService, newKeyService);
+		KekRotator rotator = new KekRotator(rawStore, "old-kek", oldKeyService, newKeyService);
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(rawStore, rotatableKeyService, params, true,
 				true, true, "new-kek", rotator);
 
@@ -288,7 +288,7 @@ class EncryptedFileSystemJcloudIntegrationTest {
 		KeyEncryptionService rotatableKeyService = new org.linagora.linshare.storage.encryption.key.RotatableKeyEncryptionService(
 				"new-kek", newKeyService, "old-kek", oldKeyService);
 		EncryptedFileDataStoreImpl store = new EncryptedFileDataStoreImpl(rawStore, rotatableKeyService, params, true,
-				true, true, "new-kek", new KekRotator(rawStore, oldKeyService, newKeyService));
+				true, true, "new-kek", new KekRotator(rawStore, "old-kek", oldKeyService, newKeyService));
 
 		// A thumbnail encrypted under the previous key, as upload wrote it.
 		EncryptedFileDataStoreImpl oldOnlyStore = new EncryptedFileDataStoreImpl(rawStore, oldKeyService, params,

@@ -29,6 +29,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
@@ -100,7 +101,7 @@ class KekRotatorTest {
 	@Test
 	void missingBlobReturnsMissing() throws Exception {
 		InMemoryFileDataStore store = new InMemoryFileDataStore();
-		KekRotator rotator = new KekRotator(store, localKeyService("old"), localKeyService("new"));
+		KekRotator rotator = new KekRotator(store, "old", localKeyService("old"), localKeyService("new"));
 		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream", 10L, "f.bin");
 		metadata.setUuid("does-not-exist");
 		metadata.setBucketUuid(BUCKET);
@@ -120,7 +121,7 @@ class KekRotatorTest {
 		long headerLength = ChunkLayout.of(headerBefore).headerTotalLength();
 
 		KeyEncryptionService newKeyService = localKeyService("new-kek");
-		KekRotator rotator = new KekRotator(store, oldKeyService, newKeyService);
+		KekRotator rotator = new KekRotator(store, "old-kek", oldKeyService, newKeyService);
 
 		RotationOutcome outcome = rotator.rotate(metadata, "new-kek");
 
@@ -156,7 +157,7 @@ class KekRotatorTest {
 		metadata.setUuid("doc-1");
 		metadata.setBucketUuid(BUCKET);
 		store.putRaw(BUCKET, "doc-1", plaintext);
-		KekRotator rotator = new KekRotator(store, localKeyService("old-kek"), localKeyService("new-kek"));
+		KekRotator rotator = new KekRotator(store, "old-kek", localKeyService("old-kek"), localKeyService("new-kek"));
 
 		assertEquals(RotationOutcome.NOT_ENCRYPTED, rotator.rotate(metadata, "new-kek"));
 		assertArrayEquals(plaintext, store.rawBytes(BUCKET, "doc-1"));
@@ -170,7 +171,7 @@ class KekRotatorTest {
 		metadata.setUuid("doc-1");
 		metadata.setBucketUuid(BUCKET);
 		store.putRaw(BUCKET, "doc-1", new byte[] { 1, 2 });
-		KekRotator rotator = new KekRotator(store, localKeyService("old-kek"), localKeyService("new-kek"));
+		KekRotator rotator = new KekRotator(store, "old-kek", localKeyService("old-kek"), localKeyService("new-kek"));
 
 		assertEquals(RotationOutcome.NOT_ENCRYPTED, rotator.rotate(metadata, "new-kek"));
 	}
@@ -186,7 +187,7 @@ class KekRotatorTest {
 		metadata.setUuid(documentLike.getUuid());
 		metadata.setBucketUuid(BUCKET);
 		KeyEncryptionService newKeyService = localKeyService("new-kek");
-		KekRotator rotator = new KekRotator(store, oldKeyService, newKeyService);
+		KekRotator rotator = new KekRotator(store, "old-kek", oldKeyService, newKeyService);
 
 		assertEquals(RotationOutcome.ROTATED, rotator.rotate(metadata, "new-kek"));
 
@@ -196,6 +197,115 @@ class KekRotatorTest {
 		assertEquals(RotationOutcome.ALREADY_ROTATED, rotator.rotate(metadata, "new-kek"));
 	}
 
+	private void assertLeftUntouched(InMemoryFileDataStore store, FileMetaData metadata, byte[] before) {
+		assertArrayEquals(before, store.rawBytes(BUCKET, metadata.getUuid()));
+		assertFalse(store.exists(tempOf(metadata)));
+	}
+
+	private FileMetaData rawBlob(InMemoryFileDataStore store, String uuid, byte[] bytes) {
+		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream",
+				(long) bytes.length, "f.bin");
+		metadata.setUuid(uuid);
+		metadata.setBucketUuid(BUCKET);
+		store.putRaw(BUCKET, uuid, bytes);
+		return metadata;
+	}
+
+	/** A valid encrypted blob with one byte of its fixed header (counted after the magic) replaced. */
+	private FileMetaData blobWithPatchedHeaderByte(InMemoryFileDataStore store, int offsetAfterMagic, int value)
+			throws IOException {
+		FileMetaData valid = encryptedMetadata(store, localKeyService("old-kek"), randomBytes(50), "doc-1");
+		byte[] bytes = store.rawBytes(BUCKET, "doc-1");
+		bytes[EncryptedBlobHeader.magic().length + offsetAfterMagic] = (byte) value;
+		store.putRaw(BUCKET, "doc-1", bytes);
+		return valid;
+	}
+
+	@Test
+	void blobUnderAnUnknownKeyIdIsReportedAndLeftUntouched() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		// From two rotations ago: neither the previous nor the current key.
+		FileMetaData metadata = encryptedMetadata(store, localKeyService("kek-2024"), randomBytes(50), "doc-1");
+		byte[] before = store.rawBytes(BUCKET, "doc-1");
+		KekRotator rotator = new KekRotator(store, "old-kek", localKeyService("old-kek"),
+				localKeyService("new-kek"));
+
+		assertEquals(RotationOutcome.UNKNOWN_KEY_ID, rotator.rotate(metadata, "new-kek"));
+		assertLeftUntouched(store, metadata, before);
+	}
+
+	@Test
+	void truncatedHeaderIsReportedUnreadable() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		byte[] magic = EncryptedBlobHeader.magic();
+		byte[] truncated = Arrays.copyOf(magic, magic.length + 3);
+		FileMetaData metadata = rawBlob(store, "doc-1", truncated);
+		KekRotator rotator = new KekRotator(store, "old-kek", localKeyService("old-kek"),
+				localKeyService("new-kek"));
+
+		assertEquals(RotationOutcome.UNREADABLE_HEADER, rotator.rotate(metadata, "new-kek"));
+		assertLeftUntouched(store, metadata, truncated);
+	}
+
+	@Test
+	void corruptedHeaderFieldIsReportedUnreadable() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		// The reserved flags byte, which must be zero.
+		FileMetaData metadata = blobWithPatchedHeaderByte(store, 3, 0x7F);
+		byte[] before = store.rawBytes(BUCKET, "doc-1");
+		KekRotator rotator = new KekRotator(store, "old-kek", localKeyService("old-kek"),
+				localKeyService("new-kek"));
+
+		assertEquals(RotationOutcome.UNREADABLE_HEADER, rotator.rotate(metadata, "new-kek"));
+		assertLeftUntouched(store, metadata, before);
+	}
+
+	@Test
+	void unsupportedFormatVersionIsReportedUnreadable() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		// The format version byte.
+		FileMetaData metadata = blobWithPatchedHeaderByte(store, 0, 0xEE);
+		byte[] before = store.rawBytes(BUCKET, "doc-1");
+		KekRotator rotator = new KekRotator(store, "old-kek", localKeyService("old-kek"),
+				localKeyService("new-kek"));
+
+		assertEquals(RotationOutcome.UNREADABLE_HEADER, rotator.rotate(metadata, "new-kek"));
+		assertLeftUntouched(store, metadata, before);
+	}
+
+	@Test
+	void corruptedWrappedKeyUnderThePreviousKeyIsReportedUnwrapFailed() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		KeyEncryptionService oldKeyService = localKeyService("old-kek");
+		FileMetaData metadata = encryptedMetadata(store, oldKeyService, randomBytes(16 * 5 + 3), "doc-1");
+		byte[] original = store.rawBytes(BUCKET, "doc-1");
+		EncryptedBlobHeader header = EncryptedBlobFormat.readHeader(new ByteArrayInputStream(original));
+		byte[] wrappedKey = header.getWrappedKeyBytes().clone();
+		wrappedKey[wrappedKey.length - 1] ^= 0x01;
+		EncryptedBlobHeader damaged = new EncryptedBlobHeader(header.getFormatVersion(), header.getAlgorithmId(),
+				header.getNonceSchemeId(), header.getPlaintextSize(), header.getChunkPlaintextSize(),
+				header.getChunkCount(), header.getNoncePrefix(), header.getKeyId(),
+				header.getReservedKeyIdCapacity(), wrappedKey, header.getReservedWrappedKeyCapacity());
+		ByteArrayOutputStream rebuilt = new ByteArrayOutputStream();
+		EncryptedBlobFormat.writeHeader(damaged, rebuilt);
+		int headerLength = (int) ChunkLayout.of(header).headerTotalLength();
+		rebuilt.write(original, headerLength, original.length - headerLength);
+		byte[] before = rebuilt.toByteArray();
+		store.putRaw(BUCKET, "doc-1", before);
+		KekRotator rotator = new KekRotator(store, "old-kek", oldKeyService, localKeyService("new-kek"));
+
+		assertEquals(RotationOutcome.UNWRAP_FAILED, rotator.rotate(metadata, "new-kek"));
+		assertLeftUntouched(store, metadata, before);
+	}
+
+	@Test
+	void constructorRejectsAMissingOldKeyId() {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+
+		org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+				() -> new KekRotator(store, "", localKeyService("old-kek"), localKeyService("new-kek")));
+	}
+
 	@Test
 	void alreadyRotatedBlobIsSkippedIdempotently() throws Exception {
 		InMemoryFileDataStore store = new InMemoryFileDataStore();
@@ -203,7 +313,7 @@ class KekRotatorTest {
 		byte[] plaintext = randomBytes(50);
 		FileMetaData metadata = encryptedMetadata(store, oldKeyService, plaintext, "doc-1");
 		KeyEncryptionService newKeyService = localKeyService("new-kek");
-		KekRotator rotator = new KekRotator(store, oldKeyService, newKeyService);
+		KekRotator rotator = new KekRotator(store, "old-kek", oldKeyService, newKeyService);
 		rotator.rotate(metadata, "new-kek");
 		byte[] afterFirstRotation = store.rawBytes(BUCKET, "doc-1");
 
@@ -232,7 +342,7 @@ class KekRotatorTest {
 				throw new UnsupportedOperationException();
 			}
 		};
-		KekRotator rotator = new KekRotator(store, oldKeyService, oversizedKeyService);
+		KekRotator rotator = new KekRotator(store, "old-kek", oldKeyService, oversizedKeyService);
 
 		RotationOutcome outcome = rotator.rotate(metadata, "oversized-kek");
 
@@ -251,7 +361,7 @@ class KekRotatorTest {
 		FileMetaData metadata = encryptedMetadata(store, oldKeyService, plaintext, "doc-1");
 		byte[] original = store.rawBytes(BUCKET, "doc-1");
 		KeyEncryptionService newKeyService = localKeyService("new-kek");
-		KekRotator rotator = new KekRotator(store, oldKeyService, newKeyService);
+		KekRotator rotator = new KekRotator(store, "old-kek", oldKeyService, newKeyService);
 
 		RotationOutcome outcome = rotator.rotate(metadata, "new-kek");
 
@@ -267,7 +377,7 @@ class KekRotatorTest {
 		byte[] plaintext = randomBytes(50);
 		FileMetaData metadata = encryptedMetadata(store, oldKeyService, plaintext, "doc-1");
 		KeyEncryptionService newKeyService = localKeyService("new-kek");
-		KekRotator rotator = new KekRotator(store, oldKeyService, newKeyService);
+		KekRotator rotator = new KekRotator(store, "old-kek", oldKeyService, newKeyService);
 
 		assertEquals(RotationOutcome.ROTATED, rotator.rotate(metadata, "new-kek"));
 		assertTrue(store.atomicReplaceWasCalled);
@@ -306,7 +416,7 @@ class KekRotatorTest {
 		KeyEncryptionService vaultKeyService = new VaultKeyEncryptionService(vaultUrl, "test-token",
 				"prod-transit-key");
 
-		KekRotator rotator = new KekRotator(store, oldKeyService, vaultKeyService);
+		KekRotator rotator = new KekRotator(store, "old-local-kek", oldKeyService, vaultKeyService);
 		RotationOutcome outcome = rotator.rotate(metadata, "prod-transit-key");
 
 		assertEquals(RotationOutcome.ROTATED, outcome);

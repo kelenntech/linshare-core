@@ -129,7 +129,8 @@ public class RotateKekBatchImpl extends GenericBatchImpl {
 	}
 
 	/**
-	 * {@code MISSING}/{@code NOT_ENCRYPTED}/{@code WRAPPED_KEY_TOO_LARGE}/{@code VERIFICATION_FAILED}
+	 * {@code MISSING}/{@code NOT_ENCRYPTED}/{@code WRAPPED_KEY_TOO_LARGE}/{@code VERIFICATION_FAILED}/
+	 * {@code UNKNOWN_KEY_ID}/{@code UNREADABLE_HEADER}/{@code UNWRAP_FAILED}
 	 * mean this blob isn't converging to the current key on its own and
 	 * needs attention, unlike {@code ALREADY_ROTATED} (the everyday steady
 	 * state) — surfaced at WARN rather than DEBUG so they're actually
@@ -158,6 +159,23 @@ public class RotateKekBatchImpl extends GenericBatchImpl {
 			console.logWarn(batchRunContext, total, position,
 					"Document {} " + kind + " blob failed post-rotation verification; it was left under the previous "
 							+ "key and will be retried on the next run.", identifier);
+			return;
+		case UNKNOWN_KEY_ID:
+			console.logWarn(batchRunContext, total, position,
+					"Document {} " + kind + " blob is wrapped under a key that is neither the previous nor the "
+							+ "current one; rotation skipped. Configure that key as previous-key-id and re-run to "
+							+ "rotate it (its key id is in the server logs).", identifier);
+			return;
+		case UNREADABLE_HEADER:
+			console.logWarn(batchRunContext, total, position,
+					"Document {} " + kind + " blob has a corrupted or truncated encryption header; rotation "
+							+ "skipped. The blob is damaged and can no longer be decrypted.", identifier);
+			return;
+		case UNWRAP_FAILED:
+			console.logWarn(batchRunContext, total, position,
+					"Document {} " + kind + " blob could not be unwrapped with the previous key; rotation skipped. "
+							+ "Check the previous key material/key service; it will be retried on the next run.",
+					identifier);
 			return;
 		default:
 			console.logDebug(batchRunContext, total, position, "Document {} " + kind + " rotation outcome: {}", identifier,

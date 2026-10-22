@@ -32,11 +32,14 @@ import org.linagora.linshare.storage.encryption.crypto.UnwrappedBlobContext;
 import org.linagora.linshare.storage.encryption.exception.EncryptedBlobAuthenticationException;
 import org.linagora.linshare.storage.encryption.exception.EncryptedBlobFormatException;
 import org.linagora.linshare.storage.encryption.exception.EncryptedBlobKeyException;
+import org.linagora.linshare.storage.encryption.exception.EncryptedBlobUnsupportedVersionException;
 import org.linagora.linshare.storage.encryption.format.ChunkLayout;
 import org.linagora.linshare.storage.encryption.format.EncryptedBlobFormat;
 import org.linagora.linshare.storage.encryption.format.EncryptedBlobHeader;
 import org.linagora.linshare.storage.encryption.key.KeyEncryptionService;
 import org.linagora.linshare.storage.encryption.key.WrappedKey;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.google.common.io.ByteSource;
 import com.google.common.io.ByteStreams;
@@ -55,24 +58,45 @@ import com.google.common.io.ByteStreams;
  * I/O pass over the (unencrypted-again) chunk data — no cryptographic work
  * on it at all — which is negligible next to how infrequently KEK rotation
  * runs.
+ *
+ * <p>Anything wrong with one blob in particular — still plaintext, an
+ * unreadable header, a key id that is neither the previous nor the current
+ * key, a wrapped key that won't unwrap — is reported as a
+ * {@link RotationOutcome} and the blob is left untouched, never thrown:
+ * the batch runner stops the whole run on an unexpected exception, so one
+ * bad blob would otherwise keep every blob after it from ever being
+ * rotated.
  */
 public class KekRotator {
+
+	private static final Logger logger = LoggerFactory.getLogger(KekRotator.class);
 
 	private static final String TEMP_KEY_SUFFIX = ".rewrapping";
 
 	private final FileDataStore delegate;
 
+	private final String oldKeyId;
+
 	private final KeyEncryptionService oldKeyEncryptionService;
 
 	private final KeyEncryptionService newKeyEncryptionService;
 
-	public KekRotator(FileDataStore delegate, KeyEncryptionService oldKeyEncryptionService,
+	/**
+	 * @param oldKeyId the key id of {@code oldKeyEncryptionService}: blobs
+	 *                 under any other key id (than this one or the new one)
+	 *                 are reported, not unwrapped.
+	 */
+	public KekRotator(FileDataStore delegate, String oldKeyId, KeyEncryptionService oldKeyEncryptionService,
 			KeyEncryptionService newKeyEncryptionService) {
 		if (delegate == null || oldKeyEncryptionService == null || newKeyEncryptionService == null) {
 			throw new IllegalArgumentException(
 					"delegate, oldKeyEncryptionService and newKeyEncryptionService must not be null");
 		}
+		if (oldKeyId == null || oldKeyId.isEmpty()) {
+			throw new IllegalArgumentException("oldKeyId must not be null or empty");
+		}
 		this.delegate = delegate;
+		this.oldKeyId = oldKeyId;
 		this.oldKeyEncryptionService = oldKeyEncryptionService;
 		this.newKeyEncryptionService = newKeyEncryptionService;
 	}
@@ -94,7 +118,14 @@ public class KekRotator {
 			// not stop every other blob from being rotated.
 			return RotationOutcome.NOT_ENCRYPTED;
 		}
-		EncryptedBlobHeader header = readHeader(metadata);
+		EncryptedBlobHeader header;
+		try {
+			header = readHeader(metadata);
+		} catch (EncryptedBlobFormatException | EncryptedBlobUnsupportedVersionException e) {
+			logger.warn("Blob {} has an unreadable LSE1 header; left untouched: {}", metadata.getUuid(),
+					e.getMessage());
+			return RotationOutcome.UNREADABLE_HEADER;
+		}
 		FileMetaData tempMetadata = tempMetadataFor(metadata);
 
 		if (header.getKeyId().equals(expectedNewKeyId)) {
@@ -103,8 +134,21 @@ public class KekRotator {
 			}
 			return RotationOutcome.ALREADY_ROTATED;
 		}
+		if (!header.getKeyId().equals(oldKeyId)) {
+			logger.warn("Blob {} is wrapped under key id \"{}\", which is neither the previous key (\"{}\") nor "
+					+ "the current one (\"{}\"); left untouched.", metadata.getUuid(), header.getKeyId(), oldKeyId,
+					expectedNewKeyId);
+			return RotationOutcome.UNKNOWN_KEY_ID;
+		}
 
-		byte[] dek = oldKeyEncryptionService.unwrap(header.getKeyId(), header.getWrappedKeyBytes());
+		byte[] dek;
+		try {
+			dek = oldKeyEncryptionService.unwrap(header.getKeyId(), header.getWrappedKeyBytes());
+		} catch (EncryptedBlobKeyException e) {
+			logger.warn("Blob {} could not be unwrapped with the previous key \"{}\"; left untouched: {}",
+					metadata.getUuid(), oldKeyId, e.getMessage());
+			return RotationOutcome.UNWRAP_FAILED;
+		}
 		try {
 			WrappedKey rewrapped = newKeyEncryptionService.wrap(dek);
 			if (!rewrapped.getKeyId().equals(expectedNewKeyId)) {

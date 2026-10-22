@@ -86,7 +86,7 @@ public class EncryptedFileDataStoreFactory {
 		if (previousKeyService != null) {
 			effectiveKeyService = new RotatableKeyEncryptionService(keyId, currentKeyService, previousKeyId,
 					previousKeyService);
-			kekRotator = new KekRotator(delegate, previousKeyService, currentKeyService);
+			kekRotator = new KekRotator(delegate, previousKeyId, previousKeyService, currentKeyService);
 		}
 		EncryptionParameters params = new EncryptionParameters(chunkSize,
 				EncryptedBlobHeader.DEFAULT_KEY_ID_CAPACITY, EncryptedBlobHeader.DEFAULT_WRAPPED_KEY_CAPACITY);

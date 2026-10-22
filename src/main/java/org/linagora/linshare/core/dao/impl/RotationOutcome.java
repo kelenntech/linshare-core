@@ -32,5 +32,18 @@ public enum RotationOutcome {
 	/** The new wrapped key/key id doesn't fit within this blob's reserved header capacity. */
 	WRAPPED_KEY_TOO_LARGE,
 
-	VERIFICATION_FAILED
+	VERIFICATION_FAILED,
+
+	/** The header's key id is neither the previous nor the current key (e.g. from two rotations ago). */
+	UNKNOWN_KEY_ID,
+
+	/** The blob has the LSE1 magic but its header is corrupt, truncated or of an unsupported version. */
+	UNREADABLE_HEADER,
+
+	/**
+	 * The header names the previous key but unwrapping failed: either this
+	 * blob's wrapped key is corrupted, or the previous key material/key
+	 * service is unavailable (the two can't be told apart from here).
+	 */
+	UNWRAP_FAILED
 }
