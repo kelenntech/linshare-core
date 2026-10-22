@@ -120,6 +120,13 @@ public class EncryptedBlobMigrator {
 			}
 			return MigrationOutcome.ALREADY_ENCRYPTED;
 		}
+		if (!canCommitOnto(metadata)) {
+			// Checked before writing anything: the temp could never be
+			// committed, so it would only be left behind. Also clears one
+			// left by a run from before this check existed.
+			removeIfExists(tempMetadata);
+			return MigrationOutcome.STORAGE_MIGRATION_PENDING;
+		}
 
 		byte[] aadBlobId = metadata.getUuid().getBytes(StandardCharsets.UTF_8);
 
@@ -144,8 +151,35 @@ public class EncryptedBlobMigrator {
 			return MigrationOutcome.VERIFICATION_FAILED;
 		}
 
-		commit(tempMetadata, metadata);
+		try {
+			commit(tempMetadata, metadata);
+		} catch (IOException | RuntimeException e) {
+			// The target is left either untouched or fully replaced by a
+			// failed commit, so the temp is redundant either way; keeping it
+			// would only make every later run re-verify and fail the same way.
+			discardTemp(tempMetadata, e);
+			throw e;
+		}
 		return MigrationOutcome.MIGRATED;
+	}
+
+	private boolean canCommitOnto(FileMetaData metadata) {
+		return !(delegate instanceof AtomicBlobReplace)
+				|| ((AtomicBlobReplace) delegate).supportsAtomicReplace(metadata);
+	}
+
+	private void removeIfExists(FileMetaData metadata) {
+		if (delegate.exists(metadata)) {
+			delegate.remove(metadata);
+		}
+	}
+
+	private void discardTemp(FileMetaData tempMetadata, Exception failure) {
+		try {
+			removeIfExists(tempMetadata);
+		} catch (RuntimeException e) {
+			failure.addSuppressed(e);
+		}
 	}
 
 	private FileMetaData tempMetadataFor(FileMetaData metadata) {

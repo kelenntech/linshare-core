@@ -198,6 +198,11 @@ public abstract class AbstractJcloudFileDataStoreImpl
 	}
 
 	@Override
+	public boolean supportsAtomicReplace(FileMetaData target) {
+		return true;
+	}
+
+	@Override
 	public boolean exists(FileMetaData metadata) {
 		String containerName = metadata.getBucketUuid();
 		if (containerName == null) {

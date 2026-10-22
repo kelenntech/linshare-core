@@ -73,6 +73,13 @@ public class DataKindBalancerFileDataStoreImpl implements FileDataStore, AtomicB
 	}
 
 	@Override
+	public boolean supportsAtomicReplace(FileMetaData target) {
+		FileDataStore store = target.getKind().equals(FileMetaDataKind.DATA) ? bigFilesDataStore
+				: smallFilesDataStore;
+		return store instanceof AtomicBlobReplace && ((AtomicBlobReplace) store).supportsAtomicReplace(target);
+	}
+
+	@Override
 	public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
 		FileDataStore store = target.getKind().equals(FileMetaDataKind.DATA) ? bigFilesDataStore
 				: smallFilesDataStore;

@@ -134,6 +134,13 @@ public class KekRotator {
 			}
 			return RotationOutcome.ALREADY_ROTATED;
 		}
+		if (!canCommitOnto(metadata)) {
+			// Checked before writing anything: the temp could never be
+			// committed, so it would only be left behind. Also clears one
+			// left by a run from before this check existed.
+			removeIfExists(tempMetadata);
+			return RotationOutcome.STORAGE_MIGRATION_PENDING;
+		}
 		if (!header.getKeyId().equals(oldKeyId)) {
 			logger.warn("Blob {} is wrapped under key id \"{}\", which is neither the previous key (\"{}\") nor "
 					+ "the current one (\"{}\"); left untouched.", metadata.getUuid(), header.getKeyId(), oldKeyId,
@@ -174,10 +181,37 @@ public class KekRotator {
 				return RotationOutcome.VERIFICATION_FAILED;
 			}
 
-			commit(tempMetadata, metadata);
+			try {
+				commit(tempMetadata, metadata);
+			} catch (IOException | RuntimeException e) {
+				// The target is left either untouched or fully replaced by a
+				// failed commit, so the temp is redundant either way; keeping
+				// it would only make every later run fail the same way.
+				discardTemp(tempMetadata, e);
+				throw e;
+			}
 			return RotationOutcome.ROTATED;
 		} finally {
 			Arrays.fill(dek, (byte) 0);
+		}
+	}
+
+	private boolean canCommitOnto(FileMetaData metadata) {
+		return !(delegate instanceof AtomicBlobReplace)
+				|| ((AtomicBlobReplace) delegate).supportsAtomicReplace(metadata);
+	}
+
+	private void removeIfExists(FileMetaData metadata) {
+		if (delegate.exists(metadata)) {
+			delegate.remove(metadata);
+		}
+	}
+
+	private void discardTemp(FileMetaData tempMetadata, Exception failure) {
+		try {
+			removeIfExists(tempMetadata);
+		} catch (RuntimeException e) {
+			failure.addSuppressed(e);
 		}
 	}
 

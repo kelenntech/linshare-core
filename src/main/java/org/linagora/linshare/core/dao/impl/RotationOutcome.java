@@ -45,5 +45,13 @@ public enum RotationOutcome {
 	 * blob's wrapped key is corrupted, or the previous key material/key
 	 * service is unavailable (the two can't be told apart from here).
 	 */
-	UNWRAP_FAILED
+	UNWRAP_FAILED,
+
+	/**
+	 * The storage backend can't replace this blob in place yet; in practice
+	 * it still lives in the old store during the gridfs-to-jcloud storage
+	 * migration. Left untouched; handled once the storage migration has
+	 * moved it.
+	 */
+	STORAGE_MIGRATION_PENDING
 }

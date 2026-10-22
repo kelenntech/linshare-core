@@ -235,6 +235,11 @@ public class MongoFileDataStoreImpl implements FileDataStore, AtomicBlobReplace 
 		gridOperations.delete(uuidQuery(source.getUuid()));
 	}
 
+	@Override
+	public boolean supportsAtomicReplace(FileMetaData target) {
+		return true;
+	}
+
 	/**
 	 * Mongo does not support an empty file name (see {@link #add}), and the
 	 * batches build target metadata from the Document, which carries none.

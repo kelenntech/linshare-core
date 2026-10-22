@@ -222,11 +222,14 @@
 					<constructor-arg ref="hibernateTemplate" />
 					<constructor-arg ref="mongoTemplate" />
 				</bean>
+				<!-- The raw store, not the encryption decorator (fileDataStore): blobs are
+					copied exactly as stored, and with encryption enabled fileDataStore
+					is never a MigrationFileDataStoreImpl. -->
 				<bean class="org.linagora.linshare.core.upgrade.v6_0.FileDataStoreMigrationUpgradeTaskImpl">
 					<constructor-arg ref="accountRepository" />
 					<constructor-arg ref="upgradeTaskLogMongoRepository" />
 					<constructor-arg ref="documentRepository" />
-					<constructor-arg ref="fileDataStore" />
+					<constructor-arg ref="rawFileDataStore" />
 				</bean>
 			</list>
 		</constructor-arg>

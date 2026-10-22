@@ -16,6 +16,8 @@
 package org.linagora.linshare.core.dao.impl;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -76,5 +78,27 @@ class DataKindBalancerFileDataStoreImplTest {
 		FileMetaData target = metadata(FileMetaDataKind.DATA, "target-uuid");
 
 		assertThrows(IOException.class, () -> balancer.atomicReplace(source, target));
+	}
+
+	@Test
+	void routesSupportsAtomicReplaceByTargetKind() {
+		AtomicFileDataStore bigStore = mock(AtomicFileDataStore.class);
+		AtomicFileDataStore smallStore = mock(AtomicFileDataStore.class);
+		FileMetaData data = metadata(FileMetaDataKind.DATA, "data-uuid");
+		FileMetaData thumbnail = metadata(FileMetaDataKind.THUMBNAIL_SMALL, "thmb-uuid");
+		org.mockito.Mockito.when(bigStore.supportsAtomicReplace(data)).thenReturn(true);
+		org.mockito.Mockito.when(smallStore.supportsAtomicReplace(thumbnail)).thenReturn(false);
+		DataKindBalancerFileDataStoreImpl balancer = new DataKindBalancerFileDataStoreImpl(bigStore, smallStore);
+
+		assertTrue(balancer.supportsAtomicReplace(data));
+		assertFalse(balancer.supportsAtomicReplace(thumbnail));
+	}
+
+	@Test
+	void cannotReplaceWhenTheRoutedStoreHasNoAtomicReplace() {
+		DataKindBalancerFileDataStoreImpl balancer = new DataKindBalancerFileDataStoreImpl(
+				mock(FileDataStore.class), mock(AtomicFileDataStore.class));
+
+		assertFalse(balancer.supportsAtomicReplace(metadata(FileMetaDataKind.DATA, "data-uuid")));
 	}
 }

@@ -306,6 +306,43 @@ class EncryptedBlobMigratorTest {
 		assertEquals(MigrationOutcome.MIGRATED, migrator.migrate(metadata));
 	}
 
+	@Test
+	void blobThatCannotBeReplacedInPlaceIsSkippedBeforeAnyTempIsWritten() throws Exception {
+		InMemoryAtomicFileDataStore store = new InMemoryAtomicFileDataStore();
+		store.canReplace = false;
+		byte[] legacyPlaintext = randomBytes(50);
+		FileMetaData metadata = legacyMetadata(store, legacyPlaintext, "doc-1");
+		// An orphan left by a run from before this check existed.
+		store.putRaw(BUCKET, "doc-1.migrating", randomBytes(10));
+		EncryptedBlobMigrator migrator = new EncryptedBlobMigrator(store, newKeyService(), smallChunkParams());
+
+		assertEquals(MigrationOutcome.STORAGE_MIGRATION_PENDING,
+				migrator.migrate(metadata, sha256Hex(legacyPlaintext)));
+
+		assertFalse(store.exists(tempOf(metadata)), "the orphan temp must be cleaned up");
+		assertFalse(store.atomicReplaceWasCalled);
+		assertArrayEquals(legacyPlaintext, store.rawBytes(BUCKET, "doc-1"));
+	}
+
+	@Test
+	void failedCommitRemovesTheTempAndLeavesTheOriginalUntouched() throws Exception {
+		InMemoryAtomicFileDataStore store = new InMemoryAtomicFileDataStore();
+		store.replaceFailure = new IOException("cannot atomically replace across backends");
+		byte[] legacyPlaintext = randomBytes(50);
+		FileMetaData metadata = legacyMetadata(store, legacyPlaintext, "doc-1");
+		EncryptedBlobMigrator migrator = new EncryptedBlobMigrator(store, newKeyService(), smallChunkParams());
+
+		IOException failure = org.junit.jupiter.api.Assertions.assertThrows(IOException.class,
+				() -> migrator.migrate(metadata, sha256Hex(legacyPlaintext)));
+
+		assertEquals("cannot atomically replace across backends", failure.getMessage());
+		assertFalse(store.exists(tempOf(metadata)), "a temp that failed to commit must not be left behind");
+		assertArrayEquals(legacyPlaintext, store.rawBytes(BUCKET, "doc-1"));
+
+		store.replaceFailure = null;
+		assertEquals(MigrationOutcome.MIGRATED, migrator.migrate(metadata, sha256Hex(legacyPlaintext)));
+	}
+
 	private FileMetaData tempOf(FileMetaData metadata) {
 		FileMetaData temp = new FileMetaData(metadata.getKind(), metadata.getMimeType(), metadata.getSize(),
 				metadata.getFileName());
@@ -390,9 +427,23 @@ class EncryptedBlobMigratorTest {
 
 		boolean atomicReplaceWasCalled;
 
+		/** What supportsAtomicReplace answers, e.g. false for a target still in the old store. */
+		boolean canReplace = true;
+
+		/** When set, atomicReplace fails with it, as a cross-backend commit would. */
+		IOException replaceFailure;
+
+		@Override
+		public boolean supportsAtomicReplace(FileMetaData target) {
+			return canReplace;
+		}
+
 		@Override
 		public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
 			atomicReplaceWasCalled = true;
+			if (replaceFailure != null) {
+				throw replaceFailure;
+			}
 			byte[] sourceBytes = blobs.remove(key(source.getBucketUuid(), source.getUuid()));
 			if (sourceBytes == null) {
 				throw new IOException("no such source blob: " + source.getUuid());

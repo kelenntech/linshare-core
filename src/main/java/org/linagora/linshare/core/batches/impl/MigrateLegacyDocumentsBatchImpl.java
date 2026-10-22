@@ -132,7 +132,7 @@ public class MigrateLegacyDocumentsBatchImpl extends GenericBatchImpl {
 	}
 
 	/**
-	 * {@code MISSING}/{@code VERIFICATION_FAILED} mean this blob isn't
+	 * {@code MISSING}/{@code VERIFICATION_FAILED}/{@code STORAGE_MIGRATION_PENDING} mean this blob isn't
 	 * converging to encrypted storage on its own and needs attention, unlike
 	 * {@code ALREADY_ENCRYPTED} (the everyday steady state) — surfaced at
 	 * WARN rather than DEBUG so they're actually visible at default
@@ -151,6 +151,12 @@ public class MigrateLegacyDocumentsBatchImpl extends GenericBatchImpl {
 			console.logWarn(batchRunContext, total, position,
 					"Document {} " + kind + " blob failed post-migration verification; it was left untouched (still "
 							+ "plaintext) and will be retried on the next run.", identifier);
+			return;
+		case STORAGE_MIGRATION_PENDING:
+			console.logWarn(batchRunContext, total, position,
+					"Document {} " + kind + " blob is still stored in the old storage backend (gridfs-to-jcloud "
+							+ "storage migration in progress); migration skipped, it will be handled once the storage "
+							+ "migration has moved it.", identifier);
 			return;
 		default:
 			console.logDebug(batchRunContext, total, position, "Document {} " + kind + " migration outcome: {}", identifier,

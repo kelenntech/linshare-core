@@ -27,5 +27,13 @@ public enum MigrationOutcome {
 
 	MISSING,
 
-	VERIFICATION_FAILED
+	VERIFICATION_FAILED,
+
+	/**
+	 * The storage backend can't replace this blob in place yet; in practice
+	 * it still lives in the old store during the gridfs-to-jcloud storage
+	 * migration. Left untouched; handled once the storage migration has
+	 * moved it.
+	 */
+	STORAGE_MIGRATION_PENDING
 }

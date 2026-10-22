@@ -16,6 +16,8 @@
 package org.linagora.linshare.core.dao.impl;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -101,5 +103,42 @@ class MigrationFileDataStoreImplTest {
 		MigrationFileDataStoreImpl migrationStore = new MigrationFileDataStoreImpl(newStore, oldStore);
 
 		assertThrows(IOException.class, () -> migrationStore.atomicReplace(source, target));
+	}
+
+	@Test
+	void cannotReplaceATargetThatOnlyLivesInTheOldStore() {
+		AtomicFileDataStore newStore = mock(AtomicFileDataStore.class);
+		AtomicFileDataStore oldStore = mock(AtomicFileDataStore.class);
+		FileMetaData target = metadata("target-uuid");
+		when(newStore.supportsAtomicReplace(target)).thenReturn(true);
+		when(oldStore.exists(target)).thenReturn(true);
+		MigrationFileDataStoreImpl migrationStore = new MigrationFileDataStoreImpl(newStore, oldStore);
+
+		// add() always writes the replacement to the new store, so it could
+		// never be committed onto a target in the old one.
+		assertFalse(migrationStore.supportsAtomicReplace(target));
+	}
+
+	@Test
+	void canReplaceATargetInTheNewStoreWhenTheNewStoreSupportsIt() {
+		AtomicFileDataStore newStore = mock(AtomicFileDataStore.class);
+		AtomicFileDataStore oldStore = mock(AtomicFileDataStore.class);
+		FileMetaData target = metadata("target-uuid");
+		when(newStore.exists(target)).thenReturn(true);
+		when(newStore.supportsAtomicReplace(target)).thenReturn(true);
+		MigrationFileDataStoreImpl migrationStore = new MigrationFileDataStoreImpl(newStore, oldStore);
+
+		assertTrue(migrationStore.supportsAtomicReplace(target));
+	}
+
+	@Test
+	void cannotReplaceWhenTheNewStoreHasNoAtomicReplace() {
+		FileDataStore newStore = mock(FileDataStore.class);
+		FileMetaData target = metadata("target-uuid");
+		when(newStore.exists(target)).thenReturn(true);
+		MigrationFileDataStoreImpl migrationStore = new MigrationFileDataStoreImpl(newStore,
+				mock(AtomicFileDataStore.class));
+
+		assertFalse(migrationStore.supportsAtomicReplace(target));
 	}
 }

@@ -27,6 +27,10 @@
 #		* files are retrieved from primary, then if not found , they are retrieved from secondary.
 #		* files are removed from primary and secondary
 #		* new files are removed only added to the primary
+#		* with storage encryption enabled, the encryption migration and key rotation
+#		  batches skip (with a WARN) documents still stored only in the secondary
+#		  store, until the storage-migration upgrade task has moved them to the
+#		  primary; that task copies encrypted blobs as they are stored.
 
 
 # Additional profiles :

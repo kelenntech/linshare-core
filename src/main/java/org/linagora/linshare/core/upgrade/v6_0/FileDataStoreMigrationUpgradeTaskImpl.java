@@ -15,7 +15,10 @@
  */
 package org.linagora.linshare.core.upgrade.v6_0;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,9 +42,21 @@ import org.linagora.linshare.core.job.quartz.ResultContext;
 import org.linagora.linshare.core.repository.AccountRepository;
 import org.linagora.linshare.core.repository.DocumentRepository;
 import org.linagora.linshare.mongo.repository.UpgradeTaskLogMongoRepository;
+import org.linagora.linshare.storage.encryption.exception.EncryptedBlobException;
+import org.linagora.linshare.storage.encryption.format.ChunkLayout;
+import org.linagora.linshare.storage.encryption.format.EncryptedBlobFormat;
+import org.linagora.linshare.storage.encryption.format.EncryptedBlobHeader;
 
 import com.google.common.io.ByteSource;
 
+/**
+ * Copies documents from the old (GridFS) store to the new (jcloud) one under
+ * the migration-gridfs-to-jcloud profile. Must be given the raw store
+ * ({@code rawFileDataStore}), never the encryption decorator: blobs are
+ * copied exactly as stored, so encrypted ones move as ciphertext (their
+ * authenticated data is bound to the uuid, which doesn't change) and legacy
+ * ones as plaintext.
+ */
 public class FileDataStoreMigrationUpgradeTaskImpl extends GenericUpgradeTaskImpl {
 
 	protected DocumentRepository repository;
@@ -87,7 +102,7 @@ public class FileDataStoreMigrationUpgradeTaskImpl extends GenericUpgradeTaskImp
 		try {
 			FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, document);
 			ByteSource byteSource = fileDataStore.get(metadata);
-			metadata = fileDataStore.add(byteSource, metadata);
+			metadata = fileDataStore.add(byteSource, withStoredSize(metadata, document.getSize()));
 			document.setBucketUuid(metadata.getBucketUuid());
 			if (document.getHasThumbnail()) {
 				console.logDebug(batchRunContext, total, position, "document has thumbnail.");
@@ -112,6 +127,41 @@ public class FileDataStoreMigrationUpgradeTaskImpl extends GenericUpgradeTaskImp
 		repository.update(document);
 		res.setProcessed(true);
 		return res;
+	}
+
+	/**
+	 * jcloud sends the metadata size as the upload's Content-Length, but a
+	 * Document's size is its plaintext size: an encrypted blob is stored
+	 * larger than that (header plus per-chunk tags), so its stored size is
+	 * read from its header instead.
+	 */
+	private FileMetaData withStoredSize(FileMetaData metadata, long plaintextSize) throws IOException {
+		FileMetaData stored = new FileMetaData(metadata.getKind(), metadata.getMimeType(),
+				storedSizeOf(metadata, plaintextSize), metadata.getFileName());
+		stored.setUuid(metadata.getUuid());
+		stored.setBucketUuid(metadata.getBucketUuid());
+		return stored;
+	}
+
+	private long storedSizeOf(FileMetaData metadata, long plaintextSize) throws IOException {
+		byte[] head;
+		try (InputStream in = fileDataStore.getRange(metadata, 0, EncryptedBlobHeader.MAX_HEADER_LENGTH)
+				.openStream()) {
+			head = in.readNBytes(EncryptedBlobHeader.MAX_HEADER_LENGTH);
+		}
+		byte[] magic = EncryptedBlobHeader.magic();
+		if (head.length < magic.length || !Arrays.equals(Arrays.copyOf(head, magic.length), magic)) {
+			return plaintextSize;
+		}
+		try {
+			return ChunkLayout.of(EncryptedBlobFormat.readHeader(new ByteArrayInputStream(head)))
+					.totalPhysicalLength();
+		} catch (EncryptedBlobException e) {
+			// Checked, so this document is reported and skipped rather than
+			// the runtime exception stopping the whole upgrade task.
+			throw new IOException("Unreadable encryption header for document " + metadata.getUuid() + ": "
+					+ e.getMessage(), e);
+		}
 	}
 
 	@Override

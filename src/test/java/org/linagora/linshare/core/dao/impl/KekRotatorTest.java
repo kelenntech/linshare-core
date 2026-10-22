@@ -306,6 +306,48 @@ class KekRotatorTest {
 				() -> new KekRotator(store, "", localKeyService("old-kek"), localKeyService("new-kek")));
 	}
 
+	private FileMetaData encryptedInAtomicStore(InMemoryAtomicFileDataStore store, KeyEncryptionService keyService,
+			byte[] plaintext, String uuid) throws IOException {
+		InMemoryFileDataStore scratch = new InMemoryFileDataStore();
+		FileMetaData metadata = encryptedMetadata(scratch, keyService, plaintext, uuid);
+		store.putRaw(BUCKET, uuid, scratch.rawBytes(BUCKET, uuid));
+		return metadata;
+	}
+
+	@Test
+	void blobThatCannotBeReplacedInPlaceIsSkippedBeforeAnyTempIsWritten() throws Exception {
+		InMemoryAtomicFileDataStore store = new InMemoryAtomicFileDataStore();
+		store.canReplace = false;
+		KeyEncryptionService oldKeyService = localKeyService("old-kek");
+		FileMetaData metadata = encryptedInAtomicStore(store, oldKeyService, randomBytes(50), "doc-1");
+		byte[] before = store.rawBytes(BUCKET, "doc-1");
+		// An orphan left by a run from before this check existed.
+		store.putRaw(BUCKET, "doc-1.rewrapping", randomBytes(10));
+		KekRotator rotator = new KekRotator(store, "old-kek", oldKeyService, localKeyService("new-kek"));
+
+		assertEquals(RotationOutcome.STORAGE_MIGRATION_PENDING, rotator.rotate(metadata, "new-kek"));
+
+		assertLeftUntouched(store, metadata, before);
+		assertFalse(store.atomicReplaceWasCalled);
+	}
+
+	@Test
+	void failedCommitRemovesTheTempAndLeavesTheOriginalUntouched() throws Exception {
+		InMemoryAtomicFileDataStore store = new InMemoryAtomicFileDataStore();
+		store.replaceFailure = new IOException("cannot atomically replace across backends");
+		KeyEncryptionService oldKeyService = localKeyService("old-kek");
+		FileMetaData metadata = encryptedInAtomicStore(store, oldKeyService, randomBytes(50), "doc-1");
+		byte[] before = store.rawBytes(BUCKET, "doc-1");
+		KekRotator rotator = new KekRotator(store, "old-kek", oldKeyService, localKeyService("new-kek"));
+
+		org.junit.jupiter.api.Assertions.assertThrows(IOException.class, () -> rotator.rotate(metadata, "new-kek"));
+
+		assertLeftUntouched(store, metadata, before);
+
+		store.replaceFailure = null;
+		assertEquals(RotationOutcome.ROTATED, rotator.rotate(metadata, "new-kek"));
+	}
+
 	@Test
 	void alreadyRotatedBlobIsSkippedIdempotently() throws Exception {
 		InMemoryFileDataStore store = new InMemoryFileDataStore();
@@ -503,9 +545,23 @@ class KekRotatorTest {
 
 		boolean atomicReplaceWasCalled;
 
+		/** What supportsAtomicReplace answers, e.g. false for a target still in the old store. */
+		boolean canReplace = true;
+
+		/** When set, atomicReplace fails with it, as a cross-backend commit would. */
+		IOException replaceFailure;
+
+		@Override
+		public boolean supportsAtomicReplace(FileMetaData target) {
+			return canReplace;
+		}
+
 		@Override
 		public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
 			atomicReplaceWasCalled = true;
+			if (replaceFailure != null) {
+				throw replaceFailure;
+			}
 			byte[] sourceBytes = blobs.remove(key(source.getBucketUuid(), source.getUuid()));
 			if (sourceBytes == null) {
 				throw new IOException("no such source blob: " + source.getUuid());

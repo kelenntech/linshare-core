@@ -16,6 +16,8 @@
 package org.linagora.linshare.core.dao.impl;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
@@ -56,5 +58,20 @@ class WrapperFileDataStoreImplTest {
 		WrapperFileDataStoreImpl wrapper = new WrapperFileDataStoreImpl(inner);
 
 		assertThrows(IOException.class, () -> wrapper.atomicReplace(metadata("source-uuid"), metadata("target-uuid")));
+	}
+
+	@Test
+	void forwardsSupportsAtomicReplaceToTheWrappedStore() {
+		AtomicFileDataStore inner = mock(AtomicFileDataStore.class);
+		FileMetaData target = metadata("target-uuid");
+		org.mockito.Mockito.when(inner.supportsAtomicReplace(target)).thenReturn(true);
+
+		assertTrue(new WrapperFileDataStoreImpl(inner).supportsAtomicReplace(target));
+	}
+
+	@Test
+	void cannotReplaceWhenTheWrappedStoreHasNoAtomicReplace() {
+		assertFalse(new WrapperFileDataStoreImpl(mock(FileDataStore.class))
+				.supportsAtomicReplace(metadata("target-uuid")));
 	}
 }

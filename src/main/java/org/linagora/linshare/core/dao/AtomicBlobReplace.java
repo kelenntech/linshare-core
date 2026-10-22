@@ -47,4 +47,20 @@ public interface AtomicBlobReplace {
 	 * {@link IOException} as a per-document, retryable failure.
 	 */
 	void atomicReplace(FileMetaData source, FileMetaData target) throws IOException;
+
+	/**
+	 * Whether a blob just written with {@link FileDataStore#add} can then be
+	 * {@link #atomicReplace}d onto {@code target}. Callers ask before
+	 * writing a replacement, so a blob that can't be committed is skipped up
+	 * front instead of leaving an orphan temp blob behind on every run.
+	 *
+	 * <p>Deliberately not a {@code default} method: decorators must forward
+	 * it to whichever backend {@code target} routes to, exactly like
+	 * {@link #atomicReplace}, and a forgotten forward must fail to compile
+	 * rather than silently answer for the wrong backend. E.g. during the
+	 * gridfs-to-jcloud storage migration, add() always writes to the new
+	 * store, so a target still living only in the old store can't be
+	 * replaced.
+	 */
+	boolean supportsAtomicReplace(FileMetaData target);
 }

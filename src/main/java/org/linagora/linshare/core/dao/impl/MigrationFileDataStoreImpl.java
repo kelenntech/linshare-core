@@ -71,6 +71,17 @@ public class MigrationFileDataStoreImpl implements FileDataStore, AtomicBlobRepl
 		}
 	}
 
+	/**
+	 * add() always writes to the new store, so a replacement can only be
+	 * committed onto a target that already lives there: one still only in
+	 * the old store must wait for the storage migration to move it.
+	 */
+	@Override
+	public boolean supportsAtomicReplace(FileMetaData target) {
+		return newDataStore.exists(target) && newDataStore instanceof AtomicBlobReplace
+				&& ((AtomicBlobReplace) newDataStore).supportsAtomicReplace(target);
+	}
+
 	@Override
 	public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
 		boolean sourceInNew = newDataStore.exists(source);

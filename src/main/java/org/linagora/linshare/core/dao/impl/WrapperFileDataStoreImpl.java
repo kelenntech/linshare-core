@@ -53,6 +53,12 @@ public class WrapperFileDataStoreImpl implements FileDataStore, AtomicBlobReplac
 	}
 
 	@Override
+	public boolean supportsAtomicReplace(FileMetaData target) {
+		return fileDataStore instanceof AtomicBlobReplace
+				&& ((AtomicBlobReplace) fileDataStore).supportsAtomicReplace(target);
+	}
+
+	@Override
 	public void atomicReplace(FileMetaData source, FileMetaData target) throws IOException {
 		if (fileDataStore instanceof AtomicBlobReplace) {
 			((AtomicBlobReplace) fileDataStore).atomicReplace(source, target);

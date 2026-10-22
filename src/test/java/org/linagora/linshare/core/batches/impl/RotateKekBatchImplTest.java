@@ -231,6 +231,22 @@ class RotateKekBatchImplTest {
 	}
 
 	@Test
+	void executeLogsWarnAndSkipsWhenStorageMigrationIsPending() throws Exception {
+		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
+		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.STORAGE_MIGRATION_PENDING);
+		Document document = documentWithBucket("doc-1");
+		when(documentRepository.findByUuid("doc-1")).thenReturn(document);
+		RotateKekBatchImpl batch = new RotateKekBatchImpl(accountRepository, documentRepository, fileDataStore);
+		BatchConsole console = mock(BatchConsole.class);
+		batch.setConsole(console);
+
+		ResultContext context = batch.execute(mock(BatchRunContext.class), "doc-1", 1, 0);
+
+		verify(console).logWarn(any(BatchRunContext.class), eq(1L), eq(0L), any(), eq("doc-1"));
+		assertEquals(false, context.getProcessed());
+	}
+
+	@Test
 	void executeDoesNotLogWarnWhenAlreadyRotated() throws Exception {
 		EncryptedFileDataStoreImpl fileDataStore = mock(EncryptedFileDataStoreImpl.class);
 		when(fileDataStore.rotateKek(any(FileMetaData.class))).thenReturn(RotationOutcome.ALREADY_ROTATED);

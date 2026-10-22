@@ -130,7 +130,7 @@ public class RotateKekBatchImpl extends GenericBatchImpl {
 
 	/**
 	 * {@code MISSING}/{@code NOT_ENCRYPTED}/{@code WRAPPED_KEY_TOO_LARGE}/{@code VERIFICATION_FAILED}/
-	 * {@code UNKNOWN_KEY_ID}/{@code UNREADABLE_HEADER}/{@code UNWRAP_FAILED}
+	 * {@code UNKNOWN_KEY_ID}/{@code UNREADABLE_HEADER}/{@code UNWRAP_FAILED}/{@code STORAGE_MIGRATION_PENDING}
 	 * mean this blob isn't converging to the current key on its own and
 	 * needs attention, unlike {@code ALREADY_ROTATED} (the everyday steady
 	 * state) — surfaced at WARN rather than DEBUG so they're actually
@@ -176,6 +176,12 @@ public class RotateKekBatchImpl extends GenericBatchImpl {
 					"Document {} " + kind + " blob could not be unwrapped with the previous key; rotation skipped. "
 							+ "Check the previous key material/key service; it will be retried on the next run.",
 					identifier);
+			return;
+		case STORAGE_MIGRATION_PENDING:
+			console.logWarn(batchRunContext, total, position,
+					"Document {} " + kind + " blob is still stored in the old storage backend (gridfs-to-jcloud "
+							+ "storage migration in progress); rotation skipped, it will be handled once the storage "
+							+ "migration has moved it.", identifier);
 			return;
 		default:
 			console.logDebug(batchRunContext, total, position, "Document {} " + kind + " rotation outcome: {}", identifier,
