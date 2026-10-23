@@ -6,7 +6,12 @@
 
 	<import resource="OPTIONAL-springContext-storage-jcloud.xml" />
 
-	<bean id="fileDataStore"
+	<!--
+		Must be named rawFileDataStore, like every storage profile:
+		springContext-storage-encryption.xml (always loaded) defines
+		fileDataStore on top of it, and the context fails to start without it.
+	-->
+	<bean id="rawFileDataStore"
 		class="org.linagora.linshare.core.dao.impl.WrapperFileDataStoreImpl">
 		<constructor-arg ref="jcloudFileDataStore" />
 	</bean>
