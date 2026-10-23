@@ -179,4 +179,28 @@ class FileDataStoreMigrationUpgradeTaskImplTest {
 		assertFalse(newStore.exists(stored));
 		verify(documentRepository, never()).update(document);
 	}
+
+	@Test
+	void reportsANegativeWrappedKeyLengthPerDocument(@TempDir Path newDir, @TempDir Path oldDir) throws Exception {
+		FileDataStore newStore = filesystemStore(newDir);
+		FileDataStore oldStore = filesystemStore(oldDir);
+		FileMetaData source = new EncryptedFileDataStoreImpl(oldStore, key(), PARAMS, true, true, true, null, null)
+				.add(ByteSource.wrap(randomBytes(1000)), new FileMetaData(FileMetaDataKind.DATA,
+						"application/octet-stream", 1000L, "f.bin"));
+		byte[] corrupted = bytes(oldStore, source);
+		// wrappedKeyLength, the fixed header's second-to-last int.
+		java.nio.ByteBuffer.wrap(corrupted).putInt(EncryptedBlobHeader.FIXED_HEADER_LENGTH - 8, -1);
+		FileMetaData metadata = new FileMetaData(FileMetaDataKind.DATA, "application/octet-stream",
+				(long) corrupted.length, "f.bin");
+		metadata.setUuid("doc-1");
+		FileMetaData stored = oldStore.add(ByteSource.wrap(corrupted), metadata);
+		Document document = document(stored, 1000);
+
+		// Returned, not thrown: a runtime exception here would stop the whole upgrade task.
+		ResultContext result = runOn(new MigrationFileDataStoreImpl(newStore, oldStore), "doc-1");
+
+		assertEquals(false, result.getProcessed());
+		assertFalse(newStore.exists(stored));
+		verify(documentRepository, never()).update(document);
+	}
 }

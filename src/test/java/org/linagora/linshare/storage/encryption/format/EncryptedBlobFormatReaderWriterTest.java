@@ -138,6 +138,24 @@ class EncryptedBlobFormatReaderWriterTest {
 	 * proving the ceiling check happens before any allocation/read sized
 	 * from those fields.
 	 */
+	/** wrappedKeyLength and reservedWrappedKeyCapacity are the fixed header's two trailing ints. */
+	private static final int WRAPPED_KEY_LENGTH_OFFSET = EncryptedBlobHeader.FIXED_HEADER_LENGTH - 8;
+
+	@Test
+	void negativeWrappedKeyLengthIsAFormatError() throws Exception {
+		for (int negative : new int[] { -1, Integer.MIN_VALUE }) {
+			ByteArrayOutputStream out = new ByteArrayOutputStream();
+			EncryptedBlobFormat.writeHeader(validHeader(), out);
+			byte[] bytes = out.toByteArray();
+			ByteBuffer.wrap(bytes).putInt(WRAPPED_KEY_LENGTH_OFFSET, negative);
+
+			// Not the IllegalArgumentException Arrays.copyOfRange would throw:
+			// callers only treat EncryptedBlobException as "this blob is corrupt".
+			assertThrows(EncryptedBlobFormatException.class,
+					() -> EncryptedBlobFormat.readHeader(new ByteArrayInputStream(bytes)), "length " + negative);
+		}
+	}
+
 	private byte[] fixedHeaderClaimingCapacities(int reservedKeyIdCapacity, int reservedWrappedKeyCapacity) {
 		ByteBuffer buffer = ByteBuffer.allocate(EncryptedBlobHeader.FIXED_HEADER_LENGTH);
 		buffer.put(EncryptedBlobHeader.magic());

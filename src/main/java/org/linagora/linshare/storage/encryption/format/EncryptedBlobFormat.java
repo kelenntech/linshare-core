@@ -76,9 +76,12 @@ public final class EncryptedBlobFormat {
 			throw new EncryptedBlobFormatException(
 					"keyIdLength " + keyIdLength + " exceeds reservedKeyIdCapacity " + reservedKeyIdCapacity);
 		}
-		if (wrappedKeyLength > reservedWrappedKeyCapacity) {
+		// Read as a signed int: a negative length must be rejected here too,
+		// or Arrays.copyOfRange below throws an IllegalArgumentException that
+		// callers don't recognise as a corrupt blob.
+		if (wrappedKeyLength < 0 || wrappedKeyLength > reservedWrappedKeyCapacity) {
 			throw new EncryptedBlobFormatException("wrappedKeyLength " + wrappedKeyLength
-					+ " exceeds reservedWrappedKeyCapacity " + reservedWrappedKeyCapacity);
+					+ " out of range [0, " + reservedWrappedKeyCapacity + "]");
 		}
 
 		byte[] keyIdRegion = new byte[reservedKeyIdCapacity];

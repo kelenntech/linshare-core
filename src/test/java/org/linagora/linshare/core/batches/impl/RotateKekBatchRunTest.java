@@ -198,4 +198,25 @@ class RotateKekBatchRunTest {
 		assertRotatedAndReadable(rawStore, store, doc3, third);
 		assertArrayEquals(truncated, rawBytes(rawStore, doc2), "the damaged blob must be left untouched");
 	}
+
+	@Test
+	void aBlobWithANegativeWrappedKeyLengthDoesNotStopTheRun(@TempDir Path tempDir) throws Exception {
+		FileDataStore rawStore = newRawStore(tempDir);
+		byte[] first = randomBytes(1000, 1);
+		byte[] third = randomBytes(1000, 3);
+		FileMetaData doc1 = storeUnder(rawStore, previousKey, "doc-1", first);
+		// A valid blob with 4 corrupted bytes: its wrappedKeyLength made negative.
+		byte[] corrupted = rawBytes(rawStore, storeUnder(rawStore, previousKey, "doc-2-source", randomBytes(1000, 2)));
+		java.nio.ByteBuffer.wrap(corrupted).putInt(EncryptedBlobHeader.FIXED_HEADER_LENGTH - 8, -1);
+		FileMetaData doc2 = storeRaw(rawStore, "doc-2", corrupted);
+		FileMetaData doc3 = storeUnder(rawStore, previousKey, "doc-3", third);
+		registerDocuments(doc1, doc2, doc3);
+		EncryptedFileDataStoreImpl store = rotatingStore(rawStore);
+
+		assertTrue(runRotation(store), "the run must not be stopped by one blob");
+
+		assertRotatedAndReadable(rawStore, store, doc1, first);
+		assertRotatedAndReadable(rawStore, store, doc3, third);
+		assertArrayEquals(corrupted, rawBytes(rawStore, doc2), "the damaged blob must be left untouched");
+	}
 }

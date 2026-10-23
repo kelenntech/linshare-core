@@ -261,6 +261,21 @@ class KekRotatorTest {
 	}
 
 	@Test
+	void negativeWrappedKeyLengthIsReportedUnreadable() throws Exception {
+		InMemoryFileDataStore store = new InMemoryFileDataStore();
+		FileMetaData metadata = encryptedMetadata(store, localKeyService("old-kek"), randomBytes(50), "doc-1");
+		byte[] bytes = store.rawBytes(BUCKET, "doc-1");
+		// wrappedKeyLength, the fixed header's second-to-last int.
+		java.nio.ByteBuffer.wrap(bytes).putInt(EncryptedBlobHeader.FIXED_HEADER_LENGTH - 8, -1);
+		store.putRaw(BUCKET, "doc-1", bytes);
+		KekRotator rotator = new KekRotator(store, "old-kek", localKeyService("old-kek"),
+				localKeyService("new-kek"));
+
+		assertEquals(RotationOutcome.UNREADABLE_HEADER, rotator.rotate(metadata, "new-kek"));
+		assertLeftUntouched(store, metadata, bytes);
+	}
+
+	@Test
 	void unsupportedFormatVersionIsReportedUnreadable() throws Exception {
 		InMemoryFileDataStore store = new InMemoryFileDataStore();
 		// The format version byte.
